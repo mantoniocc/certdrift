@@ -18,6 +18,14 @@
         "certdrift": "./bin/certdrift.js"
     },
     "types": "./types/index.d.ts",
+    "files": [
+        "src/",
+        "bin/",
+        "schema/",
+        "types/",
+        "README.md",
+        "LICENSE"
+    ],
     "engines": {
         "node": ">=24"
     }
