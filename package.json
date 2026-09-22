@@ -26,6 +26,14 @@
         "README.md",
         "LICENSE"
     ],
+    "scripts": {
+        "test": "node --test",
+        "typecheck": "tsc --noEmit",
+        "check": "npm run typecheck && npm test",
+        "build:types": "tsc -p tsconfig.types.json",
+        "prepack": "npm run build:types",
+        "fixtures": "bash test/fixtures/generates.sh"
+    },
     "engines": {
         "node": ">=24"
     }
