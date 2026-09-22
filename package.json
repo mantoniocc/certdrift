@@ -1,0 +1,24 @@
+{
+    "name": "certdrift",
+    "version": "0.0.1",
+    "license": "MIT",
+    "type": "module",
+    "exports": {
+        ".": {
+            "types": "./types/index.d.ts",
+            "default": "./src/index.js"
+        },
+        "./tls": {
+            "types": "./types/tls/index.d.ts",
+            "default": "./src/tls/index.js"
+        },
+        "./schema/*": "./schema/*.json"
+    },
+    "bin": {
+        "certdrift": "./bin/certdrift.js"
+    },
+    "types": "./types/index.d.ts",
+    "engines": {
+        "node": ">=24"
+    }
+}
