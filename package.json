@@ -54,7 +54,7 @@
         "check": "npm run typecheck && npm test",
         "build:types": "tsc -p tsconfig.types.json",
         "prepack": "npm run build:types",
-        "fixtures": "bash test/fixtures/generates.sh"
+        "fixtures": "bash test/fixtures/generate.sh"
     },
     "engines": {
         "node": ">=24"
