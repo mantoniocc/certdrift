@@ -3,6 +3,28 @@
     "version": "0.0.1",
     "license": "MIT",
     "type": "module",
+    "description": "Inspect, check and compare X.509 certificates from the terminal or as a library.",
+    "keywords": [
+        "x509",
+        "certificate",
+        "tls",
+        "ssl",
+        "mtls",
+        "pem",
+        "pki",
+        "expiry",
+        "diff",
+        "cli"
+    ],
+    "homepage": "https://github.com/mantoniocc/certdrift#readme",
+    "bugs": {
+        "url": "https://github.com/mantoniocc/certdrift/issues"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/mantoniocc/certdrift.git"
+    },
+    "author": "Mario Cortés",
     "exports": {
         ".": {
             "types": "./types/index.d.ts",
