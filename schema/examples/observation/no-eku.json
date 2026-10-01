@@ -1,0 +1,53 @@
+{
+  "contract": 1,
+  "format": "x509",
+  "observation": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "file",
+      "ref": "no-eku.crt"
+    }
+  },
+  "target": 0,
+  "certificates": [
+    {
+      "index": 0,
+      "kind": "end-entity",
+      "selfSigned": false,
+      "issuedBy": [],
+      "subject": {
+        "cn": "api.example.com",
+        "dn": "CN=api.example.com"
+      },
+      "issuer": {
+        "cn": "Example Issuing CA 1",
+        "dn": "C=US, O=Example Trust, CN=Example Issuing CA 1"
+      },
+      "serial": "AA584DEEFA2F58F4AD042288F149DD4C",
+      "notBefore": "2026-08-01T00:00:00Z",
+      "notAfter": "2026-10-30T00:00:00Z",
+      "san": {
+        "dns": [
+          "api.example.com",
+          "www.example.com"
+        ],
+        "ip": [],
+        "email": [],
+        "uri": []
+      },
+      "eku": null,
+      "key": {
+        "algorithm": "ec",
+        "size": 256,
+        "curve": "P-256"
+      },
+      "sha256": "a5a008467bd71cbeb9c52e405e4099e6a29b3b3c23bf2caeb49f1d286047ec36",
+      "spkiSha256": "d0c79a95047112b0e0e0c54cbe30e91b6d850cc0dea4f94543ad5ff9448d51bd",
+      "derived": {
+        "daysRemaining": 44.4,
+        "lifetimeFraction": 0.51
+      }
+    }
+  ],
+  "warnings": []
+}

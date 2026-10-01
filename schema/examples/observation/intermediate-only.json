@@ -1,0 +1,53 @@
+{
+  "contract": 1,
+  "format": "x509",
+  "observation": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "file",
+      "ref": "issuing-ca-1.crt"
+    }
+  },
+  "target": 0,
+  "certificates": [
+    {
+      "index": 0,
+      "kind": "ca",
+      "selfSigned": false,
+      "issuedBy": [],
+      "subject": {
+        "cn": "Example Issuing CA 1",
+        "dn": "C=US, O=Example Trust, CN=Example Issuing CA 1"
+      },
+      "issuer": {
+        "cn": "Example Root CA",
+        "dn": "C=US, O=Example Trust, CN=Example Root CA"
+      },
+      "serial": "8EEF33269BB1958043239FE8636AA688",
+      "notBefore": "2024-03-13T00:00:00Z",
+      "notAfter": "2027-03-12T23:59:59Z",
+      "san": {
+        "dns": [],
+        "ip": [],
+        "email": [],
+        "uri": []
+      },
+      "eku": [
+        "clientAuth",
+        "serverAuth"
+      ],
+      "key": {
+        "algorithm": "rsa",
+        "size": 2048,
+        "curve": null
+      },
+      "sha256": "8e10e535f20540324a29d812b4101da63eae2277782f748a8cc4961daffc160b",
+      "spkiSha256": "8d9025f5e5f01ef4262114752ad51533bab89aa93ae63c4a910b09cbb94bbc23",
+      "derived": {
+        "daysRemaining": 178.4,
+        "lifetimeFraction": 0.84
+      }
+    }
+  ],
+  "warnings": []
+}

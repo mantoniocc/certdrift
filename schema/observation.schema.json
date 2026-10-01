@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/mantoniocc/certdrift/main/schema/observation.schema.json",
+  "title": "certdrift observation",
+  "description": "What material was looked at, from where, when, and which certificates it contained. Contract version 1. Consumers must tolerate properties and enum-like values they do not know.",
+  "type": "object",
+  "required": ["contract", "format", "observation", "target", "certificates", "warnings"],
+  "properties": {
+    "contract": {
+      "description": "Contract version. Adding fields keeps 1; renaming, removing or repurposing one requires 2.",
+      "const": 1
+    },
+    "format": {
+      "description": "Format of the material. Rejecting unknown formats is deliberate: a consumer that does not understand a format must not read it as X.509.",
+      "const": "x509"
+    },
+    "observation": {
+      "description": "When and from where the material was observed. Descriptive only: it never affects comparison, classification or exit codes.",
+      "type": "object",
+      "required": ["at", "source"],
+      "properties": {
+        "at": {
+          "description": "Instant of the observation. The only input that derived values depend on.",
+          "$ref": "#/$defs/timestamp"
+        },
+        "source": { "$ref": "#/$defs/source" }
+      }
+    },
+    "target": {
+      "description": "Index in certificates[] of the certificate that check and diff operate on.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "certificates": {
+      "description": "Every certificate in the material, deduplicated by sha256, in input order.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/certificate" }
+    },
+    "warnings": {
+      "description": "Facts about the material that the rest of the observation does not show. Always present; empty when there is nothing to report. Ordered as they were found, which follows input order.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/warning" }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "description": "ISO 8601 instant in UTC with second precision, e.g. 2026-09-15T14:02:11Z. Certificates only store seconds, so no fraction is ever emitted.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "sha256": {
+      "description": "SHA-256 digest as 64 lowercase hexadecimal characters, no separators.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "name": {
+      "description": "A distinguished name.",
+      "type": "object",
+      "required": ["cn", "dn"],
+      "properties": {
+        "cn": {
+          "description": "Common name for quick reading, unescaped. null when the name has no CN component.",
+          "type": ["string", "null"]
+        },
+        "dn": {
+          "description": "Full distinguished name in certificate order, components joined with ', '. A comma inside a value keeps its backslash escape (O=Acme\\, Inc.), so components stay unambiguous.",
+          "type": "string"
+        }
+      }
+    },
+    "certificate": {
+      "type": "object",
+      "required": [
+        "index", "kind", "selfSigned", "issuedBy", "subject", "issuer", "serial",
+        "notBefore", "notAfter", "san", "eku", "key", "sha256", "spkiSha256", "derived"
+      ],
+      "properties": {
+        "index": {
+          "description": "Position of this certificate in certificates[]. Contiguous from 0, after dropping duplicates.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "description": "Derived from the certificate's own bytes, not its position. Known values: end-entity (basicConstraints does not mark it as a CA), ca. Tolerate unknown values.",
+          "type": "string",
+          "minLength": 1
+        },
+        "selfSigned": {
+          "description": "true when the issuer name equals the subject and the signature verifies with the certificate's own public key. Describes a cryptographic shape; it does NOT mean trusted root.",
+          "type": "boolean"
+        },
+        "issuedBy": {
+          "description": "Indices, in ascending order, of the certificates in this material whose subject equals this certificate's issuer and whose public key verifies its signature. Empty when the issuer is not in the material. A self-signed certificate includes itself. A cross-signed CA in the material produces more than one entry.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "subject": { "$ref": "#/$defs/name" },
+        "issuer": { "$ref": "#/$defs/name" },
+        "serial": {
+          "description": "Serial number in uppercase hexadecimal, no separators or prefix, as Node.js reports it. A leading '-' marks a negative serial, which non-conforming certificates can carry.",
+          "type": "string",
+          "pattern": "^-?[0-9A-F]+$"
+        },
+        "notBefore": { "$ref": "#/$defs/timestamp" },
+        "notAfter": { "$ref": "#/$defs/timestamp" },
+        "san": { "$ref": "#/$defs/san" },
+        "eku": {
+          "description": "Extended Key Usage: known names (serverAuth, clientAuth, codeSigning, emailProtection, timeStamping, OCSPSigning) or the OID as text, sorted. null when the extension is absent, which means EKU does not restrict the purpose — not that the certificate is good for everything.",
+          "type": ["array", "null"],
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "key": { "$ref": "#/$defs/key" },
+        "sha256": {
+          "description": "Fingerprint of the whole certificate (DER).",
+          "$ref": "#/$defs/sha256"
+        },
+        "spkiSha256": {
+          "description": "Fingerprint of the public key (SubjectPublicKeyInfo, DER). Identifies the key regardless of the certificate that carries it.",
+          "$ref": "#/$defs/sha256"
+        },
+        "derived": { "$ref": "#/$defs/derived" }
+      }
+    },
+    "san": {
+      "description": "Subject Alternative Names by type. The four lists are always present, possibly empty. Other types (DirName, othername, …) are not represented here and produce a SAN_TYPE_UNREPRESENTED warning.",
+      "type": "object",
+      "required": ["dns", "ip", "email", "uri"],
+      "properties": {
+        "dns": {
+          "description": "Lowercase, sorted.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "ip": {
+          "description": "Canonical form (IPv6 compressed and lowercase), sorted.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "email": {
+          "description": "Sorted.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "uri": {
+          "description": "Sorted.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "key": {
+      "description": "The certificate's public key.",
+      "type": "object",
+      "required": ["algorithm", "size", "curve"],
+      "properties": {
+        "algorithm": {
+          "description": "Node.js key type identifier in lowercase. Known values: rsa, rsa-pss, dsa, ec, ed25519, ed448, ml-dsa-44, ml-dsa-65, ml-dsa-87. Tolerate unknown values. null when Node.js does not identify the key type.",
+          "type": ["string", "null"],
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "size": {
+          "description": "Size in bits: modulus length for RSA, curve size for P-256/P-384/P-521. null when the algorithm has no equivalent size (Ed25519, ML-DSA) or the curve is not in the name map.",
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "curve": {
+          "description": "For EC keys, the NIST name (P-256, P-384, P-521) when one exists, otherwise the name Node.js reports (e.g. brainpoolP256r1). null for non-EC keys.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "derived": {
+      "description": "Values computed from observation.at. Ignored by diff. Checks evaluate the original dates, never these rounded values.",
+      "type": "object",
+      "required": ["daysRemaining", "lifetimeFraction"],
+      "properties": {
+        "daysRemaining": {
+          "description": "(notAfter - at) in days, one decimal. Negative once expired.",
+          "type": "number"
+        },
+        "lifetimeFraction": {
+          "description": "(at - notBefore) / (notAfter - notBefore), two decimals. Above 1 once expired, negative while not yet valid. null when notAfter is not after notBefore, since the validity period has no duration.",
+          "type": ["number", "null"]
+        }
+      }
+    },
+    "source": {
+      "description": "Where the material came from. Known kinds: file, stdin and host (produced by the CLI); external and bytes (produced only through the library). Tolerate unknown kinds.",
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "ref": {
+          "description": "Text shown to a human to identify the source: a path, '-' for stdin, host:port, or free text for external sources.",
+          "type": "string"
+        },
+        "servername": {
+          "description": "Server name sent in the TLS handshake (SNI). Only for host; null when none was sent.",
+          "type": ["string", "null"]
+        },
+        "provider": {
+          "description": "Optional label of an external source, e.g. vault. Metadata only.",
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "host" } } },
+          "then": {
+            "properties": { "ref": true, "servername": true },
+            "required": ["ref", "servername"]
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["file", "stdin", "external"] } } },
+          "then": {
+            "properties": { "ref": true },
+            "required": ["ref"]
+          }
+        }
+      ]
+    },
+    "warning": {
+      "type": "object",
+      "required": ["code", "certificate", "message"],
+      "properties": {
+        "code": {
+          "description": "Stable code for programs. Known values: DUPLICATE_CERTIFICATE, SAN_TYPE_UNREPRESENTED. Tolerate unknown values.",
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "certificate": {
+          "description": "index of the certificate the warning is about, or null when it concerns no single certificate. For a dropped duplicate, the index of the occurrence that was kept.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "message": {
+          "description": "Human-readable English text. Never parse it; decide with code.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

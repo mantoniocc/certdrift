@@ -1,0 +1,174 @@
+{
+  "contract": 1,
+  "format": "x509",
+  "observation": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "stdin",
+      "ref": "-"
+    }
+  },
+  "target": 0,
+  "certificates": [
+    {
+      "index": 0,
+      "kind": "ca",
+      "selfSigned": false,
+      "issuedBy": [
+        1,
+        2
+      ],
+      "subject": {
+        "cn": "Example Issuing CA 1",
+        "dn": "C=US, O=Example Trust, CN=Example Issuing CA 1"
+      },
+      "issuer": {
+        "cn": "Example Root CA",
+        "dn": "C=US, O=Example Trust, CN=Example Root CA"
+      },
+      "serial": "8EEF33269BB1958043239FE8636AA688",
+      "notBefore": "2024-03-13T00:00:00Z",
+      "notAfter": "2027-03-12T23:59:59Z",
+      "san": {
+        "dns": [],
+        "ip": [],
+        "email": [],
+        "uri": []
+      },
+      "eku": [
+        "clientAuth",
+        "serverAuth"
+      ],
+      "key": {
+        "algorithm": "rsa",
+        "size": 2048,
+        "curve": null
+      },
+      "sha256": "8e10e535f20540324a29d812b4101da63eae2277782f748a8cc4961daffc160b",
+      "spkiSha256": "8d9025f5e5f01ef4262114752ad51533bab89aa93ae63c4a910b09cbb94bbc23",
+      "derived": {
+        "daysRemaining": 178.4,
+        "lifetimeFraction": 0.84
+      }
+    },
+    {
+      "index": 1,
+      "kind": "ca",
+      "selfSigned": true,
+      "issuedBy": [
+        1,
+        2
+      ],
+      "subject": {
+        "cn": "Example Root CA",
+        "dn": "C=US, O=Example Trust, CN=Example Root CA"
+      },
+      "issuer": {
+        "cn": "Example Root CA",
+        "dn": "C=US, O=Example Trust, CN=Example Root CA"
+      },
+      "serial": "13B71C7A438B83E9DB9FAF02F93D504A",
+      "notBefore": "2020-01-01T00:00:00Z",
+      "notAfter": "2035-01-01T00:00:00Z",
+      "san": {
+        "dns": [],
+        "ip": [],
+        "email": [],
+        "uri": []
+      },
+      "eku": null,
+      "key": {
+        "algorithm": "rsa",
+        "size": 4096,
+        "curve": null
+      },
+      "sha256": "5a550263db02d91766adf50faa722ad0fff2675f9b5dbd5a8d4e8ca330371d0b",
+      "spkiSha256": "df6a0ae0a816a47a2932f4848c36dd4d3c91cf2da3995ebdc033611f548ba8f1",
+      "derived": {
+        "daysRemaining": 3029.4,
+        "lifetimeFraction": 0.45
+      }
+    },
+    {
+      "index": 2,
+      "kind": "ca",
+      "selfSigned": false,
+      "issuedBy": [
+        3
+      ],
+      "subject": {
+        "cn": "Example Root CA",
+        "dn": "C=US, O=Example Trust, CN=Example Root CA"
+      },
+      "issuer": {
+        "cn": "Example Legacy Root",
+        "dn": "C=US, O=Example Trust, CN=Example Legacy Root"
+      },
+      "serial": "6996E2BA6015B8FB2A71B2C21B2F9CF5",
+      "notBefore": "2024-01-01T00:00:00Z",
+      "notAfter": "2029-01-01T00:00:00Z",
+      "san": {
+        "dns": [],
+        "ip": [],
+        "email": [],
+        "uri": []
+      },
+      "eku": null,
+      "key": {
+        "algorithm": "rsa",
+        "size": 4096,
+        "curve": null
+      },
+      "sha256": "a6f2010608c0a992aa5d37e496eb0a3916201116bdb193f53a2ad31770a36d0f",
+      "spkiSha256": "df6a0ae0a816a47a2932f4848c36dd4d3c91cf2da3995ebdc033611f548ba8f1",
+      "derived": {
+        "daysRemaining": 838.4,
+        "lifetimeFraction": 0.54
+      }
+    },
+    {
+      "index": 3,
+      "kind": "ca",
+      "selfSigned": true,
+      "issuedBy": [
+        3
+      ],
+      "subject": {
+        "cn": "Example Legacy Root",
+        "dn": "C=US, O=Example Trust, CN=Example Legacy Root"
+      },
+      "issuer": {
+        "cn": "Example Legacy Root",
+        "dn": "C=US, O=Example Trust, CN=Example Legacy Root"
+      },
+      "serial": "B44A6048CC9AAF3EECD49447B80D1C0F",
+      "notBefore": "2010-01-01T00:00:00Z",
+      "notAfter": "2030-01-01T00:00:00Z",
+      "san": {
+        "dns": [],
+        "ip": [],
+        "email": [],
+        "uri": []
+      },
+      "eku": null,
+      "key": {
+        "algorithm": "rsa",
+        "size": 4096,
+        "curve": null
+      },
+      "sha256": "e79fe534f2498b2cd7a0d222c27e45533833f50dedf2ca90d9d312872f3b250d",
+      "spkiSha256": "4efd101f28f8ca088127abc934c6c0b258f8cbbf47fd42990049fc8b76db23e9",
+      "derived": {
+        "daysRemaining": 1203.4,
+        "lifetimeFraction": 0.84
+      }
+    }
+  ],
+  "warnings": [
+    {
+      "code": "DUPLICATE_CERTIFICATE",
+      "certificate": 0,
+      "message": "input block 2 duplicates input block 1 and was dropped"
+    }
+  ]
+}
