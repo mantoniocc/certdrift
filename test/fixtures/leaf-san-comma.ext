@@ -1,0 +1,12 @@
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+subjectAltName = @san
+extendedKeyUsage = serverAuth
+[san]
+DNS.1 = comma.example
+DNS.2 = a, b.example
+URI.1 = https://example.com/x, y
+dirName.1 = san_dir
+[san_dir]
+CN = Doe, John
+O = certdrift

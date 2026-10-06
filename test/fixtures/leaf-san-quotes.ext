@@ -1,0 +1,8 @@
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+subjectAltName = @san
+extendedKeyUsage = serverAuth
+[san]
+DNS.1 = quotes.example
+DNS.2 = q\"uote.example
+URI.1 = https://example.com/\"q\"

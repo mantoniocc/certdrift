@@ -13,7 +13,7 @@ set -eu
 
 WORK="${1:?usage: generate-certs.sh <output-dir>}"
 OPENSSL_MIN_MAJOR=3
-OPENSSL_MIN_MINOR=5   # 3.5 is the first version with ML-DSA
+OPENSSL_MIN_MINOR=5   # 3.5 is the first version with ML-DSA (and 3.4 the first with -not_before/-not_after)
 
 CURRENT="(setup)"
 
@@ -56,33 +56,54 @@ printf '[req]\ndistinguished_name = dn\n[dn]\n' > "$WORK/req.cnf"
 
 # --- Helpers ------------------------------------------------------------------
 
-# make_key <name> <rsa|p256|p384|p521|ed25519|ml-dsa-44>
+# make_key <name> <rsa|rsa-pss|p256|p384|p521|brainpool-p256|sm2|ed25519|ml-dsa-44>
 make_key() {
   case "$2" in
-    rsa)       openssl genpkey -quiet -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$WORK/$1.key" ;;
-    p256)      openssl genpkey -quiet -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$WORK/$1.key" ;;
-    p384)      openssl genpkey -quiet -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$WORK/$1.key" ;;
-    p521)      openssl genpkey -quiet -algorithm EC -pkeyopt ec_paramgen_curve:P-521 -out "$WORK/$1.key" ;;
-    ed25519)   openssl genpkey -quiet -algorithm ED25519 -out "$WORK/$1.key" ;;
-    ml-dsa-44) openssl genpkey -quiet -algorithm ML-DSA-44 -out "$WORK/$1.key" ;;
-    *)         die "unknown key type: $2" ;;
+    rsa)            openssl genpkey -quiet -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$WORK/$1.key" ;;
+    rsa-pss)        openssl genpkey -quiet -algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048 -out "$WORK/$1.key" ;;
+    p256)           openssl genpkey -quiet -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$WORK/$1.key" ;;
+    p384)           openssl genpkey -quiet -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$WORK/$1.key" ;;
+    p521)           openssl genpkey -quiet -algorithm EC -pkeyopt ec_paramgen_curve:P-521 -out "$WORK/$1.key" ;;
+    brainpool-p256) openssl genpkey -quiet -algorithm EC -pkeyopt ec_paramgen_curve:brainpoolP256r1 -out "$WORK/$1.key" ;;
+    sm2)            openssl genpkey -quiet -algorithm SM2 -out "$WORK/$1.key" ;;
+    ed25519)        openssl genpkey -quiet -algorithm ED25519 -out "$WORK/$1.key" ;;
+    ml-dsa-44)      openssl genpkey -quiet -algorithm ML-DSA-44 -out "$WORK/$1.key" ;;
+    *)              die "unknown key type: $2" ;;
   esac
 }
 
-# make_cert <name> <subject> <issuer|self> <extensions>
+# make_leaf_keys <name> <key type>
+# An end-entity gets two keys of the same type: <name>.key, which its
+# certificate is made from, and <name>.mismatch.key, which matches nothing.
+make_leaf_keys() {
+  make_key "$1" "$2"
+  make_key "$1.mismatch" "$2"
+}
+
+# make_cert <name> <subject> <issuer|self> <extensions> [x509 options]
 # The key <name>.key must already exist. <issuer> is the name of a certificate
 # already generated in $WORK. The extensions are written to <name>.ext as-is.
+# [x509 options] replaces the default validity (-days 365 when self-signed,
+# -days 90 otherwise); it is how a scenario sets explicit dates or a serial.
 make_cert() {
+  if [ "$#" -ge 5 ]; then
+    options="$5"
+  elif [ "$3" = self ]; then
+    options="-days 365"
+  else
+    options="-days 90"
+  fi
   printf '%s\n' "$4" > "$WORK/$1.ext"
   openssl req -new -config "$WORK/req.cnf" \
     -key "$WORK/$1.key" -subj "$2" -out "$WORK/$1.csr"
+  # $options is unquoted on purpose: it holds several words, one per option.
   if [ "$3" = self ]; then
     openssl x509 -req -in "$WORK/$1.csr" -signkey "$WORK/$1.key" \
-      -days 365 -extfile "$WORK/$1.ext" -out "$WORK/$1.pem"
+      $options -extfile "$WORK/$1.ext" -out "$WORK/$1.pem"
   else
     openssl x509 -req -in "$WORK/$1.csr" \
       -CA "$WORK/$3.pem" -CAkey "$WORK/$3.key" -CAcreateserial \
-      -days 90 -extfile "$WORK/$1.ext" -out "$WORK/$1.pem"
+      $options -extfile "$WORK/$1.ext" -out "$WORK/$1.pem"
   fi
 }
 
@@ -112,36 +133,60 @@ step "intermediate CA"
 make_key intermediate p256
 make_cert intermediate "/CN=certdrift test intermediate CA" root-ca "$INTERMEDIATE_EXT"
 
+# --- Cross-signed root --------------------------------------------------------
+# The same root, a second time: same subject and same key, but signed by an
+# older root. The intermediate then verifies against both copies.
+
+step "legacy root CA (self-signed, marked as CA)"
+make_key legacy-root p256
+make_cert legacy-root "/CN=certdrift test legacy root CA" self "$CA_EXT"
+
+step "root CA cross-signed by the legacy root"
+cp "$WORK/root-ca.key" "$WORK/root-ca-cross.key"
+make_cert root-ca-cross "/CN=certdrift test root CA" legacy-root "$CA_EXT"
+
 # --- Key algorithms -----------------------------------------------------------
 
 step "leaf RSA 2048, EKU serverAuth"
-make_key leaf-rsa rsa
+make_leaf_keys leaf-rsa rsa
 make_cert leaf-rsa "/CN=rsa.example" intermediate "$(leaf_ext "DNS:rsa.example" serverAuth)"
 
+step "leaf RSA-PSS 2048"
+make_leaf_keys leaf-rsa-pss rsa-pss
+make_cert leaf-rsa-pss "/CN=rsapss.example" intermediate "$(leaf_ext "DNS:rsapss.example" serverAuth)"
+
 step "leaf EC P-256, EKU serverAuth + clientAuth"
-make_key leaf-p256 p256
+make_leaf_keys leaf-p256 p256
 make_cert leaf-p256 "/CN=p256.example" intermediate "$(leaf_ext "DNS:p256.example" "serverAuth, clientAuth")"
 
 step "leaf EC P-384"
-make_key leaf-p384 p384
+make_leaf_keys leaf-p384 p384
 make_cert leaf-p384 "/CN=p384.example" intermediate "$(leaf_ext "DNS:p384.example" serverAuth)"
 
 step "leaf EC P-521"
-make_key leaf-p521 p521
+make_leaf_keys leaf-p521 p521
 make_cert leaf-p521 "/CN=p521.example" intermediate "$(leaf_ext "DNS:p521.example" serverAuth)"
 
+step "leaf EC brainpoolP256r1 (a curve outside the NIST names)"
+make_leaf_keys leaf-brainpool brainpool-p256
+make_cert leaf-brainpool "/CN=brainpool.example" intermediate "$(leaf_ext "DNS:brainpool.example" serverAuth)"
+
+step "leaf SM2 (a key type Node.js does not name)"
+make_leaf_keys leaf-sm2 sm2
+make_cert leaf-sm2 "/CN=sm2.example" intermediate "$(leaf_ext "DNS:sm2.example" serverAuth)"
+
 step "leaf Ed25519, no EKU"
-make_key leaf-ed25519 ed25519
+make_leaf_keys leaf-ed25519 ed25519
 make_cert leaf-ed25519 "/CN=ed25519.example" intermediate "$(leaf_ext "DNS:ed25519.example")"
 
 step "leaf ML-DSA-44"
-make_key leaf-ml-dsa-44 ml-dsa-44
+make_leaf_keys leaf-ml-dsa-44 ml-dsa-44
 make_cert leaf-ml-dsa-44 "/CN=mldsa.example" intermediate "$(leaf_ext "DNS:mldsa.example" serverAuth)"
 
 # --- Subject Alternative Name -------------------------------------------------
 
 step "leaf with every SAN kind"
-make_key leaf-san-kinds p256
+make_leaf_keys leaf-san-kinds p256
 make_cert leaf-san-kinds "/CN=kinds.example" intermediate "$(leaf_ext "@san" serverAuth)
 [san]
 DNS.1 = kinds.example
@@ -156,7 +201,7 @@ CN = kinds directory name
 O = certdrift"
 
 step "leaf with SAN values containing a comma"
-make_key leaf-san-comma p256
+make_leaf_keys leaf-san-comma p256
 make_cert leaf-san-comma "/CN=comma.example" intermediate "$(leaf_ext "@san" serverAuth)
 [san]
 DNS.1 = comma.example
@@ -170,7 +215,7 @@ O = certdrift"
 # OpenSSL config files strip a bare "; it must be written as \" to survive.
 # In this shell string, \\\" becomes \" in the file.
 step "leaf with SAN values containing quotes"
-make_key leaf-san-quotes p256
+make_leaf_keys leaf-san-quotes p256
 make_cert leaf-san-quotes "/CN=quotes.example" intermediate "$(leaf_ext "@san" serverAuth)
 [san]
 DNS.1 = quotes.example
@@ -180,15 +225,57 @@ URI.1 = https://example.com/\\\"q\\\""
 # --- Distinguished names -----------------------------------------------------
 
 step "leaf with a multi-component subject and a comma inside a value"
-make_key leaf-multi-dn p256
+make_leaf_keys leaf-multi-dn p256
 make_cert leaf-multi-dn "/C=CL/O=Acme, Inc./OU=Platform/CN=multi.example" intermediate "$(leaf_ext "DNS:multi.example" serverAuth)"
+
+# RFC 5280 requires the SAN to be critical when the subject is empty.
+step "leaf with an empty subject (no CN, SAN only)"
+make_leaf_keys leaf-no-cn p256
+make_cert leaf-no-cn "/" intermediate "$(leaf_ext "critical, DNS:nocn.example" serverAuth)"
+
+# --- Validity -----------------------------------------------------------------
+# The 6-day leaf starts when it is generated. The other two use fixed dates, so
+# they are expired, or zero-length, whenever they are generated.
+
+step "leaf valid for 6 days"
+make_leaf_keys leaf-6-days p256
+make_cert leaf-6-days "/CN=sixdays.example" intermediate "$(leaf_ext "DNS:sixdays.example" serverAuth)" \
+  "-days 6"
+
+step "leaf already expired"
+make_leaf_keys leaf-expired p256
+make_cert leaf-expired "/CN=expired.example" intermediate "$(leaf_ext "DNS:expired.example" serverAuth)" \
+  "-not_before 20250101000000Z -not_after 20250401000000Z"
+
+step "leaf with notBefore equal to notAfter"
+make_leaf_keys leaf-zero-validity p256
+make_cert leaf-zero-validity "/CN=zero.example" intermediate "$(leaf_ext "DNS:zero.example" serverAuth)" \
+  "-not_before 20260101000000Z -not_after 20260101000000Z"
+
+# --- Serial numbers -----------------------------------------------------------
+# RFC 5280 requires a positive serial; real certificates still break the rule.
+
+step "leaf with a negative serial"
+make_leaf_keys leaf-serial-negative p256
+make_cert leaf-serial-negative "/CN=negative.example" intermediate "$(leaf_ext "DNS:negative.example" serverAuth)" \
+  "-days 90 -set_serial -5"
+
+step "leaf with serial zero"
+make_leaf_keys leaf-serial-zero p256
+make_cert leaf-serial-zero "/CN=zeroserial.example" intermediate "$(leaf_ext "DNS:zeroserial.example" serverAuth)" \
+  "-days 90 -set_serial 0"
 
 # --- Self-signed --------------------------------------------------------------
 # The root CA above is the self-signed certificate marked as CA.
 
 step "self-signed leaf (not marked as CA)"
-make_key selfsigned-leaf p256
+make_leaf_keys selfsigned-leaf p256
 make_cert selfsigned-leaf "/CN=selfsigned.example" self "$(leaf_ext "DNS:selfsigned.example" serverAuth)"
+
+# --- Encodings ----------------------------------------------------------------
+
+step "leaf EC P-256 in DER (the same certificate as leaf-p256.pem)"
+openssl x509 -in "$WORK/leaf-p256.pem" -outform DER -out "$WORK/leaf-p256.der"
 
 # --- Bundles ------------------------------------------------------------------
 # Built from certificates generated above, so this section goes last.
@@ -204,6 +291,12 @@ cat "$WORK/leaf-p256.pem" "$WORK/intermediate.pem" "$WORK/intermediate.pem" "$WO
 
 step "bundle without end-entity (intermediate, root)"
 cat "$WORK/intermediate.pem" "$WORK/root-ca.pem" > "$WORK/bundle-no-leaf.pem"
+
+step "bundle with two end-entities (leaf RSA, leaf P-256, intermediate)"
+cat "$WORK/leaf-rsa.pem" "$WORK/leaf-p256.pem" "$WORK/intermediate.pem" > "$WORK/bundle-two-leaves.pem"
+
+step "bundle with a cross-signed root (intermediate, root, cross-signed root, legacy root)"
+cat "$WORK/intermediate.pem" "$WORK/root-ca.pem" "$WORK/root-ca-cross.pem" "$WORK/legacy-root.pem" > "$WORK/bundle-cross-signed.pem"
 
 # --- Finish -------------------------------------------------------------------
 

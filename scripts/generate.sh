@@ -2,8 +2,8 @@
 # Run the certificate scenario generator and publish its output.
 #
 # Usage:
-#   bash scripts/generate.sh           generate into experiments/fixtures/
-#   bash scripts/generate.sh --clean   remove generated output and leftovers
+#   bash scripts/generate.sh           generate into test/fixtures/
+#   bash scripts/generate.sh --clean   remove leftovers of interrupted runs
 #
 # Environment:
 #   OPENSSL_MODE   docker (default) | local
@@ -21,7 +21,7 @@ OPENSSL_IMAGE="${OPENSSL_IMAGE:-alpine/openssl:3.5.8@sha256:6aa2be0ed55a61fff355
 cd "$(dirname "$0")/.."
 
 GENERATOR="scripts/generate-certs.sh"
-OUT="experiments/fixtures"
+OUT="test/fixtures"
 
 log() { printf '%s\n' "$*" >&2; }
 die() { log "✗ $*"; exit 1; }
@@ -32,7 +32,7 @@ usage() { log "usage: bash scripts/generate.sh [--clean | --help]"; }
 
 case "${1:-}" in
   "")      ;;
-  --clean) rm -rf "${OUT:?}" tmp/fixtures.*; log "✓ removed $OUT and leftovers"; exit 0 ;;
+  --clean) rm -rf tmp/fixtures.*; log "✓ removed leftovers in tmp/"; exit 0 ;;
   --help)  usage; exit 0 ;;
   *)       usage; exit 2 ;;
 esac

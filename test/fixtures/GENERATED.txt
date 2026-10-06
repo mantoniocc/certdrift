@@ -1,0 +1,14 @@
+OpenSSL 3.5.8 25 Aug 2026 (Library: OpenSSL 3.5.8 25 Aug 2026)
+built on: Tue Aug 25 20:58:57 2026 UTC
+platform: linux-x86_64
+options:  bn(64,64)
+compiler: cc -fPIC -pthread -m64 -Wa,--noexecstack -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -g -Os -fstack-clash-protection -Wformat -Werror=format-security -fno-plt -g -Wa,--noexecstack -DOPENSSL_USE_NODELETE -DL_ENDIAN -DOPENSSL_PIC -DOPENSSL_BUILDING_OPENSSL -DNDEBUG
+OPENSSLDIR: "/etc/ssl"
+ENGINESDIR: "/usr/lib/engines-3"
+MODULESDIR: "/usr/lib/ossl-modules"
+Seeding source: os-specific
+CPUINFO: OPENSSL_ia32cap=0xfeda3203478bffff:0x00000000009c03a9:0x0000000000000000:0x0000000000000000:0x0000000000000000
+
+mode: docker
+image: alpine/openssl:3.5.8@sha256:6aa2be0ed55a61fff35583e5763c2ea8288bcd3549d316b954b01eec32fb7006
+generated: 2026-10-06T18:21:29Z

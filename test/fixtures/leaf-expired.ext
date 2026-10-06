@@ -1,0 +1,4 @@
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+subjectAltName = DNS:expired.example
+extendedKeyUsage = serverAuth
