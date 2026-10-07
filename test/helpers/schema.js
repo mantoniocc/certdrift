@@ -20,7 +20,7 @@ const cache = new Map();
  * @param {string} name Schema file name without `.schema.json`, e.g. `"observation"`.
  * @returns {(document: unknown) => string[]}
  */
-export function validateFor(name) {
+export function validatorFor(name) {
     const cached = cache.get(name);
     if (cached) return cached;
 

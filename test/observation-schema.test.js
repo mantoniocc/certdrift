@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { validateFor } from "./helpers/schema.js";
+import { validatorFor } from "./helpers/schema.js";
 
 const examplesUrl = new URL("../schema/examples/observation/", import.meta.url);
 
@@ -10,7 +10,7 @@ function readJson(url) {
     return JSON.parse(readFileSync(url, "utf8"));
 }
 
-const errorsOf = validateFor("observation");
+const errorsOf = validatorFor("observation");
 
 test("the schema compiles in strict mode", () => {
     assert.equal(typeof errorsOf, "function");
