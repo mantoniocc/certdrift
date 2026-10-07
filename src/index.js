@@ -1,5 +1,5 @@
 /**
  * certdrift public entry point.
- * The core API lands in Phase 1; nothing is exported yet.
+ * Nothing is exported yet: the package is a placeholder with no API.
  */
 export {};
