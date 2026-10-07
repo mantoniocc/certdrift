@@ -29,4 +29,12 @@ jobs:
             - run: npm ci
 
             - run: npm run check
+
+    ci-passed:
+        needs: check
+        if: always()
+        runs-on: ubuntu-latest
+        steps:
+            - if: needs.check.result != 'success'
+              run: exit 1
     
