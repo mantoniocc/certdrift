@@ -1,9 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import Ajv2020 from "ajv/dist/2020.js";
+import { validateFor } from "./helpers/schema.js";
 
-const schemaUrl = new URL("../schema/observation.schema.json", import.meta.url);
 const examplesUrl = new URL("../schema/examples/observation/", import.meta.url);
 
 /** @param {URL} url */
@@ -11,19 +10,10 @@ function readJson(url) {
     return JSON.parse(readFileSync(url, "utf8"));
 }
 
-// strict: a misspelled keyword in the schema is an error, not something silently ignored.
-// allErrors: report every failure in a document, not only the first one.
-const ajv = new Ajv2020.default({ strict: true, allErrors: true });
-const validate = ajv.compile(readJson(schemaUrl));
-
-/** @param {unknown} document */
-function errorsOf(document) {
-    if (validate(document)) return [];
-    return (validate.errors ?? []).map((e) => `${e.instancePath || "/"} ${e.message}`)
-}
+const errorsOf = validateFor("observation");
 
 test("the schema compiles in strict mode", () => {
-    assert.equal(typeof validate, "function");
+    assert.equal(typeof errorsOf, "function");
 });
 
 const exampleFiles = readdirSync(examplesUrl).filter((name) => name.endsWith(".json")).sort();
