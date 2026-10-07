@@ -12,7 +12,7 @@ producing structured JSON instead of OpenSSL's human-oriented text.
 ## Invariants
 
 `test/invariants.test.js` is the source of truth: it fails when an invariant is broken.
-Read it; do not restate it. (Not written yet)
+Read it; do not restate it.
 
 ## Commands
 
@@ -20,6 +20,16 @@ Read it; do not restate it. (Not written yet)
 - `npm test` — tests only.
 
 The full list is `scripts` in `package.json`.
+
+## Tests
+
+- Test files end in `.test.js`. `npm test` runs only that pattern, so a test file named
+  otherwise is silently skipped.
+- Validate any JSON output with `validatorFor(name)` from `test/helpers/schema.js`, not with a
+  new Ajv setup.
+- `npm run fixtures` regenerates `test/fixtures/` with new keys, and most validity dates are
+  relative to the day it runs. Never depend on a fixture's exact bytes or fingerprints, or on
+  the current time: pin `at` and assert on properties every regeneration keeps.
 
 ## Changes
 
