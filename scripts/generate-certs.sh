@@ -145,6 +145,21 @@ step "root CA cross-signed by the legacy root"
 cp "$WORK/root-ca.key" "$WORK/root-ca-cross.key"
 make_cert root-ca-cross "/CN=certdrift test root CA" legacy-root "$CA_EXT"
 
+# --- Other shapes of a root ---------------------------------------------------
+# Each one is a way a name, a key and a signature can disagree about who issued whom.
+
+step "root CA rolled over to an RSA key (same name, signed by the root)"
+make_key root-ca-rollover rsa
+make_cert root-ca-rollover "/CN=certdrift test root CA" root-ca "$CA_EXT"
+
+step "root CA renewed under the same key (self-signed again)"
+cp "$WORK/root-ca.key" "$WORK/root-ca-renewed.key"
+make_cert root-ca-renewed "/CN=certdrift test root CA" self "$CA_EXT"
+
+step "root CA whose name differs only in case (same key, self-signed)"
+cp "$WORK/root-ca.key" "$WORK/root-ca-recased.key"
+make_cert root-ca-recased "/CN=Certdrift Test Root CA" self "$CA_EXT"
+
 # --- Key algorithms -----------------------------------------------------------
 
 step "leaf RSA 2048, EKU serverAuth"
@@ -297,6 +312,9 @@ cat "$WORK/leaf-rsa.pem" "$WORK/leaf-p256.pem" "$WORK/intermediate.pem" > "$WORK
 
 step "bundle with a cross-signed root (intermediate, root, cross-signed root, legacy root)"
 cat "$WORK/intermediate.pem" "$WORK/root-ca.pem" "$WORK/root-ca-cross.pem" "$WORK/legacy-root.pem" > "$WORK/bundle-cross-signed.pem"
+
+step "bundle with a root and its renewal (root, renewed root)"
+cat "$WORK/root-ca.pem" "$WORK/root-ca-renewed.pem" > "$WORK/bundle-renewed-root.pem"
 
 # --- Finish -------------------------------------------------------------------
 

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { types } from "node:util";
 import { certificatesIn } from "./material.js";
+import { chainOf } from "./chain.js";
 
 /**
  * Where the material came from. The CLI and the TLS layer fill `ref` and `servername`.
@@ -66,6 +67,8 @@ import { certificatesIn } from "./material.js";
  * @returns {Observation}
  * @throws {import("./errors.js").ParseError} The material is empty, or one of its blocks is not
  *   a readable certificate. The message says which input block, counting from 1.
+ * @throws {import("./errors.js").AmbiguousTargetError} More than one certificate signs no other
+ *   one, or every one signs another. It lists the candidates.
  * @throws {TypeError} An argument has the wrong type.
  */
 export function inspect(material, options) {
@@ -78,15 +81,16 @@ export function inspect(material, options) {
     const at = instantOf(options?.at);
     const source = sourceOf(options?.source);
 
-    const certificates = certificatesIn(material).map(describe);
+    const chain = chainOf(certificatesIn(material));
+    const certificates = chain.members.map((read, index) => describe(read, index, chain.issuedBy[index]));
 
     return {
         contract: 1,
         format: "x509",
         observation: { at: timestamp(at), source },
-        target: 0, // PENDING: the certificate that signs no other one in the material
+        target: chain.target,
         certificates,
-        warnings: [], // PENDING: one warning per duplicate dropped and per SAN type not represented
+        warnings: chain.warnings, // PENDING: add one warning per certificate and SAN type not represented
     };
 }
 
@@ -95,19 +99,23 @@ export function inspect(material, options) {
  *
  * Fields marked PENDING are not read from the certificate yet. They all follow one rule: a
  * constant that says "nothing found" — null where the schema allows it, otherwise the empty or
- * zero value of the type — except `kind`, which has no empty value and gets the one for a
- * certificate that is not marked as a CA. Each is valid against the schema and none of them is
- * a claim about the certificate. To replace one, read the value where its line is.
+ * zero value of the type. Each is valid against the schema and none of them is a claim about
+ * the certificate. To replace one, read the value where its line is.
+ *
+ * `kind` follows Node.js's `ca`, which is false for a certificate marked CA whose Key Usage
+ * lacks `keyCertSign`: that bit is what lets a key sign certificates, and verifiers such as
+ * OpenSSL do not accept such a certificate as a CA either.
  * @param {import("./material.js").CertificateRead} read
  * @param {number} index
+ * @param {number[]} issuedBy
  * @returns {CertificateObservation}
  */
-function describe({ certificate, spki }, index) {
+function describe({ certificate, spki, sha256: fingerprint }, index, issuedBy) {
     return {
         index,
-        kind: "end-entity", // PENDING: "ca" when basicConstraints marks a CA
-        selfSigned: false, // PENDING: issuer equals subject and the signature verifies with its own key
-        issuedBy: [], // PENDING: indices of the certificates in the material that verify its signature
+        kind: certificate.ca ? "ca" : "end-entity",
+        selfSigned: issuedBy.includes(index),
+        issuedBy,
         subject: { cn: null, dn: "" }, // PENDING: the subject name
         issuer: { cn: null, dn: "" }, // PENDING: the issuer name
         serial: "0", // PENDING: the serial number in uppercase hexadecimal
@@ -116,7 +124,7 @@ function describe({ certificate, spki }, index) {
         san: { dns: [], ip: [], email: [], uri: [] }, // PENDING: the subject alternative names by type
         eku: null, // PENDING: the extended key usages, sorted
         key: { algorithm: null, size: null, curve: null }, // PENDING: the public key's algorithm, size and curve
-        sha256: sha256(certificate.raw),
+        sha256: fingerprint,
         spkiSha256: sha256(spki),
         derived: { daysRemaining: 0, lifetimeFraction: null }, // PENDING: values computed from the observation instant
     };

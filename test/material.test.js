@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { X509Certificate } from "node:crypto";
 import { inspect, ParseError } from "../src/index.js";
 
@@ -165,14 +165,22 @@ test("a boundary line is found when text precedes it on the same line", () => {
 });
 
 test("a PEM block holding two certificates throws instead of keeping the first", async (t) => {
-    // The leaf is 480 bytes, a multiple of three, so its base64 has no padding and the join is valid base64.
+    // Whether two bodies glued together are still valid base64 depends on the first certificate's
+    // size: a multiple of three has no padding. Fixtures are regenerated with new sizes, so the
+    // first certificate is chosen by that property instead of by name.
+    const singles = readdirSync(fixturesUrl).filter((name) => /^(leaf|root|intermediate|legacy)[^.]*\.pem$/.test(name)).sort();
+    const sizeOf = (/** @type {string} */ name) => new X509Certificate(fixture(name)).raw.length;
+    const unpadded = singles.find((name) => sizeOf(name) % 3 === 0);
+    const padded = singles.find((name) => sizeOf(name) % 3 !== 0);
+    assert.ok(unpadded && padded, "the fixtures must include certificates of both kinds of size");
+
     await t.test("with no padding in between", () => {
-        const joined = `-----BEGIN CERTIFICATE-----\n${bodyOf("leaf-p256.pem")}\n${bodyOf("intermediate.pem")}\n-----END CERTIFICATE-----\n`;
+        const joined = `-----BEGIN CERTIFICATE-----\n${bodyOf(unpadded)}\n${bodyOf("intermediate.pem")}\n-----END CERTIFICATE-----\n`;
         assertParseError(joined, 1, /bytes after its certificate/);
     });
 
     await t.test("with padding in between", () => {
-        const joined = `-----BEGIN CERTIFICATE-----\n${bodyOf("root-ca.pem")}\n${bodyOf("leaf-p256.pem")}\n-----END CERTIFICATE-----\n`;
+        const joined = `-----BEGIN CERTIFICATE-----\n${bodyOf(padded)}\n${bodyOf("leaf-p256.pem")}\n-----END CERTIFICATE-----\n`;
         assertParseError(joined, 1, /not valid base64/);
     });
 });

@@ -1,2 +1,2 @@
 export { inspect } from "./inspect.js";
-export { ParseError } from "./errors.js";
+export { ParseError, AmbiguousTargetError } from "./errors.js";
