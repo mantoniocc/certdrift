@@ -1,4 +1,4 @@
-import { X509Certificate } from "node:crypto";
+import { X509Certificate, createHash } from "node:crypto";
 import { ParseError } from "./errors.js";
 
 // Node.js reads only the first certificate of a PEM bundle and only the first one of
@@ -13,6 +13,7 @@ import { ParseError } from "./errors.js";
  * @property {number} block Position of its input block, counting every PEM block from 1.
  * @property {X509Certificate} certificate
  * @property {Buffer} spki The public key as SubjectPublicKeyInfo DER, as Node.js exports it.
+ * @property {string} sha256 Fingerprint of the whole certificate (DER), lowercase hexadecimal.
  */
 
 // Something that looks like a boundary line: three or more dashes, then BEGIN or END in any
@@ -163,5 +164,5 @@ function readCertificate(block, label, der) {
     } catch (cause) {
         throw new ParseError(`input block ${block} (${label}) has a public key Node.js cannot read`, block, { cause });
     }
-    return { block, certificate, spki };
+    return { block, certificate, spki, sha256: createHash("sha256").update(raw).digest("hex") };
 }

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { X509Certificate, createHash } from "node:crypto";
-import { inspect, ParseError } from "../src/index.js";
+import { inspect, ParseError, AmbiguousTargetError } from "../src/index.js";
 import { validatorFor } from "./helpers/schema.js";
 
 const fixturesUrl = new URL("fixtures/", import.meta.url);
@@ -24,7 +24,7 @@ function fingerprint(name) {
 
 /**
  * The order of the certificates in each bundle, as scripts/generate-certs.sh builds them.
- * Bundles that change meaning once duplicates and ambiguous targets are decided are left out.
+ * Bundles with duplicates or without a single target are left out; chain.test.js covers them.
  */
 const BUNDLES = {
     "bundle-ordered.pem": ["leaf-p256.pem", "intermediate.pem", "root-ca.pem"],
@@ -230,20 +230,27 @@ test("throws a ParseError that says which block failed for empty material, a cor
     });
 });
 
-// PENDING: bundle-two-leaves.pem leaves this loop once an ambiguous target makes inspect throw.
-test("the observation of every fixture validates against the observation schema and holds every certificate", async (t) => {
+// Material in which no single certificate is the one it is about. Instead of an observation the
+// call throws, so these are checked for that and not for the schema.
+const AMBIGUOUS = new Set(["bundle-two-leaves.pem", "bundle-renewed-root.pem"]);
+
+test("the observation of every fixture validates against the observation schema and holds every distinct certificate", async (t) => {
     const names = readdirSync(fixturesUrl).filter((name) => /\.(pem|der)$/.test(name));
     assert.ok(names.length >= 30, `expected the fixtures, found ${names.length}`);
 
     for (const name of names) {
         await t.test(name, () => {
             const bytes = fixture(name);
+            if (AMBIGUOUS.has(name)) {
+                assert.throws(() => inspect(bytes, { at: AT }), AmbiguousTargetError);
+                return;
+            }
             const observation = inspect(bytes, { at: AT });
             assert.deepEqual(errorsOf(observation), []);
 
-            // The number of certificates in the file, counted without the library.
-            const inFile = name.endsWith(".der") ? 1 : bytes.toString("latin1").split("-----BEGIN CERTIFICATE-----").length - 1;
-            assert.equal(observation.certificates.length, inFile);
+            // The number of different certificates in the file, counted without the library.
+            const blocks = name.endsWith(".der") ? ["der"] : (bytes.toString("latin1").match(/-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g) ?? []);
+            assert.equal(observation.certificates.length, new Set(blocks).size);
             observation.certificates.forEach((certificate, position) => assert.equal(certificate.index, position));
             assert.ok(observation.target < observation.certificates.length);
 
