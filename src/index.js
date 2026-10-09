@@ -1,5 +1,2 @@
-/**
- * certdrift public entry point.
- * Nothing is exported yet: the package is a placeholder with no API.
- */
-export {};
+export { inspect } from "./inspect.js";
+export { ParseError } from "./errors.js";
