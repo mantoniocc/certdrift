@@ -298,8 +298,10 @@ test("no generic list is added for unrepresented types: san holds exactly dns, i
     for (const name of ["leaf-san-kinds.pem", "leaf-san-comma.pem"]) {
         const observation = observe(name);
         assert.deepEqual(Object.keys(observation.certificates[0].san), ["dns", "ip", "email", "uri"], name);
-        // Nothing of the DirName or the otherName reaches the output in any form.
-        assert.doesNotMatch(JSON.stringify(observation), /kinds directory name|CN=|UPN|user@example\.com|Doe/, name);
+        // Nothing of the DirName or the otherName reaches the output in any form. The subject and
+        // issuer names are left out of the scan: their own `CN=` is not the DirName's.
+        const output = JSON.stringify(observation, (key, value) => (key === "subject" || key === "issuer" ? undefined : value));
+        assert.doesNotMatch(output, /kinds directory name|CN=|UPN|user@example\.com|Doe/, name);
     }
 });
 
