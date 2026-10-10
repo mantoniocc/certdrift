@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { types } from "node:util";
 import { certificatesIn } from "./material.js";
 import { chainOf } from "./chain.js";
+import { subjectAltNames } from "./san.js";
 
 /**
  * Where the material came from. The CLI and the TLS layer fill `ref` and `servername`.
@@ -29,7 +30,7 @@ import { chainOf } from "./chain.js";
  * @property {string} serial
  * @property {string} notBefore
  * @property {string} notAfter
- * @property {{ dns: string[], ip: string[], email: string[], uri: string[] }} san
+ * @property {import("./san.js").SubjectAltNames} san
  * @property {string[] | null} eku
  * @property {{ algorithm: string | null, size: number | null, curve: string | null }} key
  * @property {string} sha256
@@ -82,7 +83,13 @@ export function inspect(material, options) {
     const source = sourceOf(options?.source);
 
     const chain = chainOf(certificatesIn(material));
-    const certificates = chain.members.map((read, index) => describe(read, index, chain.issuedBy[index]));
+    const names = chain.members.map(({ certificate, block }) => subjectAltNames(certificate.subjectAltName, block));
+    const certificates = chain.members.map((read, index) => describe(read, index, chain.issuedBy[index], names[index].names));
+    const unrepresented = names.flatMap(({ unrepresented: found }, index) => found.map(({ type, count }) => ({
+        code: "SAN_TYPE_UNREPRESENTED",
+        certificate: index,
+        message: `the subject alternative names hold ${count} ${type} ${count === 1 ? "entry" : "entries"}, which the observation does not represent`,
+    })));
 
     return {
         contract: 1,
@@ -90,7 +97,7 @@ export function inspect(material, options) {
         observation: { at: timestamp(at), source },
         target: chain.target,
         certificates,
-        warnings: chain.warnings, // PENDING: add one warning per certificate and SAN type not represented
+        warnings: [...chain.warnings, ...unrepresented],
     };
 }
 
@@ -108,9 +115,10 @@ export function inspect(material, options) {
  * @param {import("./material.js").CertificateRead} read
  * @param {number} index
  * @param {number[]} issuedBy
+ * @param {import("./san.js").SubjectAltNames} san
  * @returns {CertificateObservation}
  */
-function describe({ certificate, spki, sha256: fingerprint }, index, issuedBy) {
+function describe({ certificate, spki, sha256: fingerprint }, index, issuedBy, san) {
     return {
         index,
         kind: certificate.ca ? "ca" : "end-entity",
@@ -121,7 +129,7 @@ function describe({ certificate, spki, sha256: fingerprint }, index, issuedBy) {
         serial: "0", // PENDING: the serial number in uppercase hexadecimal
         notBefore: "1970-01-01T00:00:00Z", // PENDING: the start of validity
         notAfter: "1970-01-01T00:00:00Z", // PENDING: the end of validity
-        san: { dns: [], ip: [], email: [], uri: [] }, // PENDING: the subject alternative names by type
+        san,
         eku: null, // PENDING: the extended key usages, sorted
         key: { algorithm: null, size: null, curve: null }, // PENDING: the public key's algorithm, size and curve
         sha256: fingerprint,
