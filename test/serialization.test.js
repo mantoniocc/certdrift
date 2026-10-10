@@ -2,34 +2,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { X509Certificate } from "node:crypto";
+import { inspect } from "../src/index.js";
 import { validatorFor } from "./helpers/schema.js";
 
 const fixturesUrl = new URL("fixtures/", import.meta.url);
-const examplesUrl = new URL("../schema/examples/observation/", import.meta.url);
 const errorsOf = validatorFor("observation");
+const AT = new Date("2026-09-15T14:02:11Z");
 
 /** @param {string} name File name in test/fixtures/, e.g. `"leaf-rsa.pem"`. */
 function certificate(name) {
     return new X509Certificate(readFileSync(new URL(name, fixturesUrl)));
-}
-
-/**
- * A valid observation whose key block is read from a fixture, copying the fields one by one
- * instead of spreading `asymmetricKeyDetails`. The library cannot build observations yet, so
- * this builds one by hand; once it can, call the library here instead.
- * It only handles RSA keys, so `curve` is always null. Everything else comes from an example
- * with a fixed `observation.at`, so nothing depends on the clock.
- * @param {string} name
- */
-function observationWithKeyOf(name) {
-    const observation = JSON.parse(readFileSync(new URL("file-single.json", examplesUrl), "utf8"));
-    const { publicKey } = certificate(name);
-    observation.certificates[0].key = {
-        algorithm: publicKey.asymmetricKeyType ?? null,
-        size: publicKey.asymmetricKeyDetails?.modulusLength ?? null,
-        curve: null,
-    };
-    return observation;
 }
 
 // Node reports publicExponent as a BigInt for both key types.
@@ -47,9 +29,9 @@ for (const { name, algorithm } of RSA_FIXTURES) {
         assert.throws(() => JSON.stringify(details), TypeError);
     });
 
-    test(`${name}: an observation derived from it serializes and validates`, () => {
+    test(`${name}: the observation inspect() builds from it serializes and validates`, () => {
         // Throws "Do not know how to serialize a BigInt" if one reached the observation.
-        const json = JSON.stringify(observationWithKeyOf(name));
+        const json = JSON.stringify(inspect(readFileSync(new URL(name, fixturesUrl)), { at: AT }));
 
         const observation = JSON.parse(json);
         assert.deepEqual(errorsOf(observation), []);

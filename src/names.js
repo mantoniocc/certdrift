@@ -1,4 +1,18 @@
 /**
+ * The distinguished name in certificate order, components joined with `, `.
+ *
+ * Node.js separates the components with a line break and writes a backslash before a comma
+ * inside a value (`O=Acme\, Inc.`). The backslash stays: without it that value would be
+ * indistinguishable from two components. A line break inside a value is written `\0A`, so a
+ * line break in the text only ever separates components.
+ * @param {string | undefined} text `undefined` is what Node.js gives for an empty name.
+ * @returns {string}
+ */
+export function distinguishedName(text) {
+    return (text ?? "").split("\n").join(", ");
+}
+
+/**
  * The common name in the text Node.js gives for a subject or an issuer: one component per
  * line, `TYPE=value`, the components of a multi-valued RDN joined by ` + `, and a value
  * written with a backslash before every character that would be ambiguous (`\,`, `\+`, `\\`,

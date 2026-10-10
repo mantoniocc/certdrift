@@ -3,6 +3,11 @@ import { types } from "node:util";
 import { certificatesIn } from "./material.js";
 import { chainOf } from "./chain.js";
 import { subjectAltNames } from "./san.js";
+import { commonName, distinguishedName } from "./names.js";
+import { extendedKeyUsage } from "./usage.js";
+import { publicKeyOf } from "./key.js";
+import { derivedOf } from "./derived.js";
+import { validityDate } from "./dates.js";
 
 /**
  * Where the material came from. The CLI and the TLS layer fill `ref` and `servername`.
@@ -84,7 +89,7 @@ export function inspect(material, options) {
 
     const chain = chainOf(certificatesIn(material));
     const names = chain.members.map(({ certificate, block }) => subjectAltNames(certificate.subjectAltName, block));
-    const certificates = chain.members.map((read, index) => describe(read, index, chain.issuedBy[index], names[index].names));
+    const certificates = chain.members.map((read, index) => describe(read, index, chain.issuedBy[index], names[index].names, at));
     const unrepresented = names.flatMap(({ unrepresented: found }, index) => found.map(({ type, count }) => ({
         code: "SAN_TYPE_UNREPRESENTED",
         certificate: index,
@@ -104,11 +109,6 @@ export function inspect(material, options) {
 /**
  * One certificate's entry in the observation.
  *
- * Fields marked PENDING are not read from the certificate yet. They all follow one rule: a
- * constant that says "nothing found" — null where the schema allows it, otherwise the empty or
- * zero value of the type. Each is valid against the schema and none of them is a claim about
- * the certificate. To replace one, read the value where its line is.
- *
  * `kind` follows Node.js's `ca`, which is false for a certificate marked CA whose Key Usage
  * lacks `keyCertSign`: that bit is what lets a key sign certificates, and verifiers such as
  * OpenSSL do not accept such a certificate as a CA either.
@@ -116,25 +116,29 @@ export function inspect(material, options) {
  * @param {number} index
  * @param {number[]} issuedBy
  * @param {import("./san.js").SubjectAltNames} san
+ * @param {Date} at
  * @returns {CertificateObservation}
+ * @throws {import("./errors.js").ParseError} A validity date that is not a real instant.
  */
-function describe({ certificate, spki, sha256: fingerprint }, index, issuedBy, san) {
+function describe({ certificate, block, spki, sha256: fingerprint }, index, issuedBy, san, at) {
+    const notBefore = validityDate(certificate.validFromDate, certificate.validFrom, block, "notBefore");
+    const notAfter = validityDate(certificate.validToDate, certificate.validTo, block, "notAfter");
     return {
         index,
         kind: certificate.ca ? "ca" : "end-entity",
         selfSigned: issuedBy.includes(index),
         issuedBy,
-        subject: { cn: null, dn: "" }, // PENDING: the subject name
-        issuer: { cn: null, dn: "" }, // PENDING: the issuer name
-        serial: "0", // PENDING: the serial number in uppercase hexadecimal
-        notBefore: "1970-01-01T00:00:00Z", // PENDING: the start of validity
-        notAfter: "1970-01-01T00:00:00Z", // PENDING: the end of validity
+        subject: { cn: commonName(certificate.subject), dn: distinguishedName(certificate.subject) },
+        issuer: { cn: commonName(certificate.issuer), dn: distinguishedName(certificate.issuer) },
+        serial: certificate.serialNumber,
+        notBefore: timestamp(notBefore),
+        notAfter: timestamp(notAfter),
         san,
-        eku: null, // PENDING: the extended key usages, sorted
-        key: { algorithm: null, size: null, curve: null }, // PENDING: the public key's algorithm, size and curve
+        eku: extendedKeyUsage(certificate.keyUsage),
+        key: publicKeyOf(certificate.publicKey),
         sha256: fingerprint,
         spkiSha256: sha256(spki),
-        derived: { daysRemaining: 0, lifetimeFraction: null }, // PENDING: values computed from the observation instant
+        derived: derivedOf(notBefore, notAfter, at),
     };
 }
 
