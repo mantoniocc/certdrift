@@ -18,6 +18,9 @@ Read it; do not restate it.
 
 - `npm run check` — type check, then tests. CI runs exactly this; it must pass.
 - `npm test` — tests only.
+- `npm run package:check` — packs the tarball, installs it outside the repository and checks what
+  arrives. Slow, so it is not part of `check`; CI runs it on pull requests. Run it when a change
+  touches `package.json`, `exports`, `files`, `bin/` or the type build.
 
 The full list is `scripts` in `package.json`.
 
