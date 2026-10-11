@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rootCertificates } from "node:tls";
@@ -377,6 +377,11 @@ test("--quiet prints nothing and keeps the exit code", async () => {
         [["inspect", "-q", "missing.pem"], 3],
         [["inspect", "-q", typed("leaf-p256.key")], 3],
         [["inspect", "-q", "--help"], 0],
+        [["inspect", "-q", "--query", "certificates[0].sha256", typed("leaf-p256.pem")], 0],
+        [["inspect", "-q", "--query", "certificates[9].sha256", typed("leaf-p256.pem")], 0],
+        [["inspect", "-q", "--query", "certificates[0].nope", typed("leaf-p256.pem")], 2],
+        [["inspect", "-q", "--query", "certificates[0].nope", "missing.pem"], 2],
+        [["inspect", "-q", "--query", "certificates[", typed("leaf-p256.pem")], 2],
     ]);
     for (const [args, code] of cases) {
         const result = await run(args, { cwd });
@@ -605,6 +610,7 @@ const FLAG_ARGUMENTS = {
     quiet: ["--json", "--quiet"],
     select: ["--json", "--select", sha256Of("leaf-p256.pem").slice(0, 12)],
     help: ["--json", "--help"],
+    query: ["--query", "observation.source"],
 };
 
 test("no flag writes into the observation's source", async () => {
@@ -619,6 +625,9 @@ test("no flag writes into the observation's source", async () => {
         } else if (flag === "help") {
             assert.match(result.stdout, /^certdrift inspects/);
             assert.equal(result.stdout.includes('"source"'), false);
+        } else if (flag === "query") {
+            // The one flag that prints part of the observation: the part is the source as it is.
+            assert.equal(result.stdout, `${JSON.stringify({ kind: "file", ref: typed("bundle-ordered.pem") })}\n`);
         } else {
             const { source } = observationOf(result).observation;
             assert.deepEqual(source, { kind: "file", ref: typed("bundle-ordered.pem") }, flag);
@@ -854,4 +863,366 @@ test("standard input is read to its end however many chunks it arrives in", { ti
     const observation = observationOf(await run(["inspect", "--json", "--select", error.candidates[0].sha256.slice(0, 20), "-"], { input: roots }));
     assert.equal(observation.certificates.length, rootCertificates.length);
     assert.deepEqual(observation.observation.source, { kind: "stdin", ref: "-" });
+});
+
+// ---------------------------------------------------------------------------------------------
+// --query
+
+const CWD = new URL(root).pathname;
+
+/** The README, with the code formatting taken out so that its sentences can be matched. */
+const readme = () => readFileSync(new URL("README.md", root), "utf8").replaceAll("`", "").replace(/\s+/g, " ");
+
+test("--query checks the path against the schema before reading anything: an unknown path exits 2 with \"unknown field in observation v1\"", { timeout: 20_000 }, async () => {
+    const unknown = await run(["inspect", "--query", "certificates[0].san.dnss", typed("leaf-p256.pem")], { cwd: CWD });
+    assert.equal(unknown.code, 2);
+    assert.equal(unknown.stdout, "");
+    assert.match(unknown.stderr, /^certdrift: unknown field in observation v1: certificates\[0\]\.san\.dnss\n/);
+
+    // The message names the path as far as the schema knows it, and the first step it does not.
+    const deep = await run(["inspect", "--query", "certificates[0].key.size.bits.more", typed("leaf-p256.pem")], { cwd: CWD });
+    assert.match(deep.stderr, /^certdrift: unknown field in observation v1: certificates\[0\]\.key\.size\.bits\n/);
+
+    // Before reading: the file does not exist, and a typo is still misuse, not a missing file.
+    // The same path spelled right reads the file and fails with 3, so the order is what is shown.
+    const missing = await run(["inspect", "--query", "certificates[0].nope", "missing.pem"], { cwd: CWD });
+    assert.deepEqual([missing.code, missing.stdout], [2, ""]);
+    assert.match(missing.stderr, /^certdrift: unknown field in observation v1/);
+    const spelledRight = await run(["inspect", "--query", "certificates[0].sha256", "missing.pem"], { cwd: CWD });
+    assert.equal(spelledRight.code, 3);
+
+    // Nor does it wait on a standard input that never ends, or on one that holds no certificate.
+    const open = await run(["inspect", "--query", "target.nope", "-"], { openStdin: true });
+    assert.deepEqual([open.code, open.stdout], [2, ""]);
+    const garbage = await run(["inspect", "--query", "target.nope", "-"], { input: "not a certificate" });
+    assert.equal(garbage.code, 2);
+
+    // A path that is not in the grammar is misuse too, and says what it expected.
+    for (const path of ["", "certificates[", "certificates[-1]", "certificates[*]", "certificates[?(@.index==0)]", ".target", "target.", "certificates[0]x"]) {
+        const result = await run(["inspect", "--query", path, typed("leaf-p256.pem")], { cwd: CWD });
+        assert.deepEqual([path, result.code, result.stdout], [path, 2, ""]);
+        assert.match(result.stderr, /^certdrift: --query: (the path is empty|expected )/, path);
+    }
+
+    const empty = await run(["inspect", "--query", "", typed("leaf-p256.pem")], { cwd: CWD });
+    assert.match(empty.stderr, /^certdrift: --query: the path is empty\n/);
+
+    // Misuse says how to fix it, like the rest of the command.
+    assert.match(unknown.stderr, /Usage: certdrift inspect .*--query <path>/);
+    assert.match(unknown.stderr, /Run certdrift --help for the options\.\n$/);
+});
+
+test("--query with an index out of range on a valid path exits 0, prints nothing and says so on stderr", async () => {
+    for (const path of ["certificates[9].sha256", "certificates[0].san.dns[99]", "certificates[3]", "warnings[0]", "certificates[0].issuedBy[5]"]) {
+        const result = await run(["inspect", "--query", path, typed("bundle-ordered.pem")], { cwd: CWD });
+        assert.deepEqual([path, result.code, result.stdout], [path, 0, ""]);
+        assert.match(result.stderr, /^certdrift: no value for .+: .*out of range\n$/, path);
+    }
+    const note = await run(["inspect", "--query", "certificates[9].sha256", typed("bundle-ordered.pem")], { cwd: CWD });
+    assert.equal(note.stderr, "certdrift: no value for certificates[9].sha256: certificates has 3 items, so [9] is out of range\n");
+
+    // The last index that exists is a value, so the boundary is where it is.
+    const last = await run(["inspect", "--query", "certificates[2].index", typed("bundle-ordered.pem")], { cwd: CWD });
+    assert.deepEqual([last.code, last.stdout, last.stderr], [0, "2\n", ""]);
+
+    // A number too large to be one is still just past the end.
+    const huge = await run(["inspect", "--query", `certificates[${"9".repeat(400)}].sha256`, typed("bundle-ordered.pem")], { cwd: CWD });
+    assert.deepEqual([huge.code, huge.stdout], [0, ""]);
+    assert.match(huge.stderr, /out of range/);
+});
+
+test("--query prints scalars without quotes and arrays and objects as compact JSON", async () => {
+    const leaf = expected("leaf-p256.pem");
+    const certificate = leaf.certificates[0];
+    assert.ok(certificate.san.dns.length > 0 && certificate.eku !== null, "the fixture has a DNS name and an EKU");
+
+    /** @type {[string, string][]} */
+    const table = [
+        ["certificates[0].sha256", certificate.sha256],
+        ["certificates[0].spkiSha256", certificate.spkiSha256],
+        ["certificates[0].notAfter", certificate.notAfter],
+        ["certificates[0].subject.cn", certificate.subject.cn ?? ""],
+        ["certificates[0].subject.dn", certificate.subject.dn],
+        ["certificates[0].san.dns[0]", certificate.san.dns[0]],
+        ["certificates[0].eku[0]", /** @type {string[]} */ (certificate.eku)[0]],
+        ["certificates[0].kind", certificate.kind],
+        ["certificates[0].serial", certificate.serial],
+        ["format", "x509"],
+        ["observation.source.kind", "file"],
+        ["observation.source.ref", typed("leaf-p256.pem")],
+        // A number, a boolean and null are JSON, so a string "false" and the boolean false look the same here.
+        ["target", "0"],
+        ["contract", "1"],
+        ["certificates[0].selfSigned", "false"],
+        ["certificates[0].key.size", "256"],
+        // Arrays and objects are compact JSON on one line.
+        ["certificates[0].san.dns", JSON.stringify(certificate.san.dns)],
+        ["certificates[0].san.ip", "[]"],
+        ["certificates[0].eku", JSON.stringify(certificate.eku)],
+        ["certificates[0].issuedBy", JSON.stringify(certificate.issuedBy)],
+        ["certificates[0].key", JSON.stringify(certificate.key)],
+        ["certificates[0].san", JSON.stringify(certificate.san)],
+        ["certificates[0].subject", JSON.stringify(certificate.subject)],
+        ["warnings", "[]"],
+        ["observation.source", JSON.stringify({ kind: "file", ref: typed("leaf-p256.pem") })],
+    ];
+    for (const [path, text] of table) {
+        const result = await run(["inspect", "--query", path, typed("leaf-p256.pem")], { cwd: CWD });
+        assert.deepEqual([path, result.code, result.stdout, result.stderr], [path, 0, `${text}\n`, ""]);
+    }
+
+    // Values that depend on the clock are numbers with a sign and a decimal point, and are not asserted on.
+    const remaining = await run(["inspect", "--query", "certificates[0].derived.daysRemaining", typed("leaf-p256.pem")], { cwd: CWD });
+    assert.match(remaining.stdout, /^-?[0-9]+(\.[0-9])?\n$/);
+    const at = await run(["inspect", "--query", "observation.at", typed("leaf-p256.pem")], { cwd: CWD });
+    assert.match(at.stdout, /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\n$/);
+
+    // A value that is null prints as null, and an empty string as an empty line: neither is nothing.
+    const noName = expected("leaf-no-cn.pem");
+    assert.equal(noName.certificates[noName.target].subject.cn, null);
+    const nullCn = await run(["inspect", "--query", "certificates[0].subject.cn", typed("leaf-no-cn.pem")], { cwd: CWD });
+    assert.deepEqual([nullCn.code, nullCn.stdout, nullCn.stderr], [0, "null\n", ""]);
+
+    // A value with quotes, commas and spaces in it is the text itself, which a shell can capture whole.
+    const quotes = expected("leaf-san-quotes.pem");
+    const names = quotes.certificates[quotes.target].san.dns;
+    for (const [position, name] of names.entries()) {
+        const result = await run(["inspect", "--query", `certificates[0].san.dns[${position}]`, typed("leaf-san-quotes.pem")], { cwd: CWD });
+        assert.equal(result.stdout, `${name}\n`);
+    }
+
+    // Through standard input it is the same value, and it comes through the same document --json prints.
+    const stdin = await run(["inspect", "--query", "certificates[0].sha256", "-"], { input: fixture("leaf-p256.pem") });
+    assert.equal(stdin.stdout, `${certificate.sha256}\n`);
+    const json = observationOf(await run(["inspect", "--json", typed("bundle-ordered.pem")], { cwd: CWD }));
+    for (const path of ["target", "warnings", "certificates[1].subject", "certificates[2].issuedBy", "certificates[0].san"]) {
+        const result = await run(["inspect", "--query", path, typed("bundle-ordered.pem")], { cwd: CWD });
+        const value = path.split(/[.[\]]+/).filter(Boolean).reduce((node, key) => node[key], /** @type {any} */ (json));
+        assert.equal(result.stdout, `${typeof value === "string" ? value : JSON.stringify(value)}\n`, path);
+    }
+
+    // Never coloured: the output is a value, and a script captures it.
+    const plain = await run(["inspect", "--query", "certificates[0].subject.cn", typed("leaf-p256.pem")], { cwd: CWD, env: { NO_COLOR: undefined } });
+    assert.equal(plain.stdout.includes(ESC), false);
+});
+
+test("--query chooses the certificate the way the rest of the command does: an ambiguous bundle is still ambiguous, and --select resolves it", async () => {
+    const ambiguous = await run(["inspect", "--query", "target", typed("bundle-two-leaves.pem")], { cwd: CWD });
+    assert.deepEqual([ambiguous.code, ambiguous.stdout], [2, ""]);
+    assert.match(ambiguous.stderr, /Use --select/);
+
+    const prefix = sha256Of("leaf-rsa.pem").slice(0, 12);
+    const bundle = observationOf(await run(["inspect", "--json", "--select", prefix, typed("bundle-two-leaves.pem")], { cwd: CWD }));
+    const index = await run(["inspect", "--query", "target", "--select", prefix, typed("bundle-two-leaves.pem")], { cwd: CWD });
+    assert.equal(index.stdout, `${bundle.target}\n`);
+    const sha256 = await run(["inspect", "--query", `certificates[${bundle.target}].sha256`, "--select", prefix, typed("bundle-two-leaves.pem")], { cwd: CWD });
+    assert.ok(sha256.stdout.startsWith(prefix), sha256.stdout);
+});
+
+test("--query reads the schema from disk next to the command, from any working directory and wherever the package is copied", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "certdrift-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const path = typed("leaf-p256.pem");
+    const absolute = new URL(path, root).pathname;
+
+    // A schema in the working directory, in the place a relative lookup would find it, is not used.
+    mkdirSync(join(dir, "decoy", "schema"), { recursive: true });
+    writeFileSync(join(dir, "decoy", "schema", "observation.schema.json"), JSON.stringify({ properties: { onlyThis: {} } }));
+    const decoy = await run(["inspect", "--query", "certificates[0].sha256", absolute], { cwd: join(dir, "decoy") });
+    assert.deepEqual([decoy.code, decoy.stdout], [0, `${sha256Of("leaf-p256.pem")}\n`]);
+    const notDecoy = await run(["inspect", "--query", "onlyThis", absolute], { cwd: join(dir, "decoy") });
+    assert.equal(notDecoy.code, 2);
+
+    // From a directory with nothing in it, and from the root of the file system.
+    for (const cwd of [dir, "/"]) {
+        const result = await run(["inspect", "--query", "certificates[0].sha256", absolute], { cwd });
+        assert.deepEqual([cwd, result.code, result.stdout], [cwd, 0, `${sha256Of("leaf-p256.pem")}\n`]);
+    }
+
+    // The package copied elsewhere, as an install puts it, answers from the schema it carries:
+    // the same path is declared in the original and not in a copy whose schema lacks it.
+    const copy = join(dir, "installed", "node_modules", "certdrift");
+    for (const entry of ["bin", "src", "schema", "package.json"]) cpSync(new URL(entry, root).pathname, join(copy, entry), { recursive: true });
+    const installed = join(copy, "bin", "certdrift.js");
+    const schemaFile = join(copy, "schema", "observation.schema.json");
+    const original = JSON.parse(readFileSync(schemaFile, "utf8"));
+    const runCopy = (/** @type {string} */ query) => spawnCopy(installed, ["inspect", "--query", query, absolute], dir);
+
+    assert.equal((await runCopy("target")).code, 0);
+    delete original.properties.target;
+    writeFileSync(schemaFile, JSON.stringify(original));
+    const removed = await runCopy("target");
+    assert.equal(removed.code, 2);
+    assert.match(removed.stderr, /unknown field in observation v1: target/);
+    assert.equal((await run(["inspect", "--query", "target", absolute], { cwd: dir })).code, 0, "the original still declares it");
+
+    // A schema that is not there is a broken installation, not misuse and not bad material.
+    rmSync(join(copy, "schema"), { recursive: true });
+    const broken = await runCopy("target");
+    assert.equal(broken.code, 1);
+    assert.match(broken.stderr, /observation\.schema\.json/);
+    // And it is only read when --query is given.
+    const plain = await spawnCopy(installed, ["inspect", "--json", absolute], dir);
+    assert.equal(plain.code, 0, plain.stderr);
+});
+
+/**
+ * Runs another copy of the executable.
+ * @param {string} script
+ * @param {string[]} args
+ * @param {string} cwd
+ * @returns {Promise<Result>}
+ */
+function spawnCopy(script, args, cwd) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [script, ...args], { cwd, env: { PATH: process.env.PATH, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+        /** @type {Buffer[]} */ const out = [];
+        /** @type {Buffer[]} */ const err = [];
+        child.stdout.on("data", (chunk) => out.push(chunk));
+        child.stderr.on("data", (chunk) => err.push(chunk));
+        child.on("error", reject);
+        child.on("close", (code) => resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") }));
+    });
+}
+
+test("the help text and the README say: to extract a value, --query; to make a decision, the checking command", async () => {
+    const help = (await run(["--help"])).stdout.replace(/\s+/g, " ");
+    // "the checking command" is how both say it until that command exists, and `certdrift check` is how they will.
+    const rule = /To extract a value, use (--query)\. To make a decision, use (the checking command|certdrift check)/;
+    assert.match(help, rule);
+    assert.match(readme(), rule);
+
+    // The help lists the flag like the others, and the usage line shows it.
+    const text = (await run(["inspect", "-h"])).stdout;
+    assert.match(text, /^  --query <path>  /m);
+    assert.match(text, /^Usage: .*--query <path>/m);
+    // The README's existing statement about the package is untouched.
+    assert.match(readme(), /The package published on npm is a placeholder\.\*\* Version 0\.0\.1 exists only to reserve the name/);
+});
+
+test("the help says a field the contract tolerates but the schema does not declare does not exist for --query, and the walk rejects one present in a document", async () => {
+    const help = (await run(["--help"])).stdout.replace(/\s+/g, " ");
+    assert.match(help, /A field the contract tolerates but the schema does not declare does not exist for --query/);
+    assert.match(readme(), /A field the contract tolerates but the schema does not declare does not exist for --query/);
+
+    // The help also says what the grammar is, to quote the path, and what a missing value does.
+    assert.match(help, /field names separated by dots, and numeric indices in square brackets/);
+    assert.match(help, /Quote it/);
+    assert.match(help, /exits 0 and prints nothing on standard output, with a note on standard error/);
+    assert.match(help, /does not declare, such as a typo, exits 2/);
+
+    // The one with an extra field in the observation itself is the walk's test, in query.test.js;
+    // here it is the command that answers a path the schema does not declare, whatever the observation holds.
+    const result = await run(["inspect", "--query", "observation.source.customField", typed("leaf-p256.pem")], { cwd: CWD });
+    assert.equal(result.code, 2);
+});
+
+test("a declared field that this observation does not have is not an error: an absent one and a null on the way exit 0 with a note", async () => {
+    // A file has no servername: the field exists in the contract, for a host, and is absent here.
+    const absent = await run(["inspect", "--query", "observation.source.servername", typed("leaf-p256.pem")], { cwd: CWD });
+    assert.deepEqual([absent.code, absent.stdout], [0, ""]);
+    assert.equal(absent.stderr, 'certdrift: no value for observation.source.servername: observation.source has no field "servername"\n');
+
+    // A root has no EKU extension, which is null, and an index into null leads nowhere.
+    const root_ = expected("root-ca.pem");
+    assert.equal(root_.certificates[root_.target].eku, null);
+    const onTheWay = await run(["inspect", "--query", "certificates[0].eku[0]", typed("root-ca.pem")], { cwd: CWD });
+    assert.deepEqual([onTheWay.code, onTheWay.stdout], [0, ""]);
+    assert.equal(onTheWay.stderr, "certdrift: no value for certificates[0].eku[0]: certificates[0].eku is null, which has no index [0]\n");
+    // The null itself is a value.
+    const itself = await run(["inspect", "--query", "certificates[0].eku", typed("root-ca.pem")], { cwd: CWD });
+    assert.deepEqual([itself.code, itself.stdout, itself.stderr], [0, "null\n", ""]);
+});
+
+test("--query prints what the certificate holds exactly, and what it echoes about the path on stderr is escaped", async () => {
+    const held = inspect(HOSTILE, { at: AT }).certificates[0];
+    const cn = await run(["inspect", "--query", "certificates[0].subject.cn", "-"], { input: HOSTILE });
+    assert.equal(cn.code, 0, cn.stderr);
+    assert.equal(cn.stdout, `${held.subject.cn}\n`, "a script captures the text itself, control characters included");
+    assert.ok(cn.stdout.includes(ESC));
+    const dns = await run(["inspect", "--query", "certificates[0].san.dns", "-"], { input: HOSTILE });
+    assert.equal(dns.stdout, `${JSON.stringify(held.san.dns)}\n`);
+
+    // What a person typed is echoed back with its control characters shown, as everything else on stderr.
+    const path = `certificates[0].${ESC}pwned\u0007`;
+    const unknown = await run(["inspect", "--query", path, typed("leaf-p256.pem")], { cwd: CWD });
+    assert.equal(unknown.code, 2);
+    assert.equal(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(unknown.stderr), false);
+    assert.ok(unknown.stderr.includes("\\u{1B}pwned\\u{7}"), unknown.stderr);
+    // A path that is not even in the grammar is reported by position, with none of its text.
+    const syntax = await run(["inspect", "--query", `certificates[0]${ESC}`, typed("leaf-p256.pem")], { cwd: CWD });
+    assert.equal(syntax.code, 2);
+    assert.equal(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(syntax.stderr), false);
+});
+
+test("--query given twice, empty, or with --json or --verbose is misuse, and --query=value and a flag after the path work", async () => {
+    const path = typed("leaf-p256.pem");
+    /** @type {[string, string[]][]} */
+    const misuse = [
+        ["twice", ["inspect", "--query", "target", "--query", "format", path]],
+        ["twice with the same path", ["inspect", "--query", "target", "--query", "target", path]],
+        ["twice, one of them unknown", ["inspect", "--query", "target", "--query", "nope", path]],
+        ["empty", ["inspect", "--query", "", path]],
+        ["empty with an equals sign", ["inspect", "--query=", path]],
+        ["no value", ["inspect", path, "--query"]],
+        ["followed by a flag", ["inspect", "--query", "--json", path]],
+        ["with --json", ["inspect", "--json", "--query", "target", path]],
+        ["with --verbose", ["inspect", "-v", "--query", "target", path]],
+        ["with --json and an unknown path", ["inspect", "--json", "--query", "nope", path]],
+        ["no path to read", ["inspect", "--query", "target"]],
+    ];
+    for (const [name, args] of misuse) {
+        const result = await run(args, { cwd: CWD });
+        assert.deepEqual([name, result.code, result.stdout], [name, 2, ""]);
+        assert.match(result.stderr, /^certdrift: /, name);
+    }
+
+    for (const args of [
+        ["inspect", "--query=target", path],
+        ["inspect", path, "--query", "target"],
+        ["inspect", "--query", "target", "--", path],
+        ["inspect", path, "--query=target"],
+    ]) {
+        const result = await run(args, { cwd: CWD });
+        assert.deepEqual([args.join(" "), result.code, result.stdout, result.stderr], [args.join(" "), 0, "0\n", ""]);
+    }
+});
+
+test("--query answers only for names the schema declares: the names every JavaScript object has are not fields", async () => {
+    for (const path of ["__proto__", "constructor", "toString", "hasOwnProperty", "certificates.length", "certificates[0].constructor", "certificates[0].san.dns.length", "certificates[0].__proto__.x", "observation.source.__proto__"]) {
+        const result = await run(["inspect", "--query", path, typed("leaf-p256.pem")], { cwd: CWD });
+        assert.deepEqual([path, result.code, result.stdout], [path, 2, ""]);
+        assert.match(result.stderr, /^certdrift: unknown field in observation v1: /, path);
+    }
+});
+
+test("--query on cases beyond the fixtures a script meets: a DER file, warnings, whitespace and a value that starts with a dash", async () => {
+    // DER and PEM are the same certificate, so the same value.
+    const der = await run(["inspect", "--query", "certificates[0].sha256", typed("leaf-p256.der")], { cwd: CWD });
+    assert.deepEqual([der.code, der.stdout], [0, `${sha256Of("leaf-p256.pem")}\n`]);
+
+    // A warning is a string and a number to a script, and only the first exists when there is one.
+    const duplicates = expected("bundle-duplicates.pem");
+    assert.equal(duplicates.warnings.length, 1);
+    const code = await run(["inspect", "--query", "warnings[0].code", typed("bundle-duplicates.pem")], { cwd: CWD });
+    assert.equal(code.stdout, `${duplicates.warnings[0].code}\n`);
+    const certificate = await run(["inspect", "--query", "warnings[0].certificate", typed("bundle-duplicates.pem")], { cwd: CWD });
+    assert.equal(certificate.stdout, `${duplicates.warnings[0].certificate}\n`);
+    const second = await run(["inspect", "--query", "warnings[1].code", typed("bundle-duplicates.pem")], { cwd: CWD });
+    assert.deepEqual([second.code, second.stdout], [0, ""]);
+    assert.match(second.stderr, /out of range/);
+
+    // The path is not trimmed or interpreted: whitespace is part of a name, and no field has one.
+    for (const path of [" target", "target ", "target\n", "target\r", "\ttarget", "tar get", "ＴＡＲＧＥＴ", "Target", "TARGET", "certificates[0] .sha256", "certificates [0].sha256"]) {
+        const result = await run(["inspect", "--query", path, typed("leaf-p256.pem")], { cwd: CWD });
+        assert.deepEqual([JSON.stringify(path), result.code, result.stdout], [JSON.stringify(path), 2, ""]);
+        assert.equal(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(result.stderr), false, JSON.stringify(path));
+    }
+
+    // A path that starts with a dash is a name after an equals sign, which the schema does not know,
+    // and without it the parser refuses the ambiguity: either way it is misuse.
+    for (const args of [["--query=-x"], ["--query", "-x"], ["--query=--json"]]) {
+        const result = await run(["inspect", ...args, typed("leaf-p256.pem")], { cwd: CWD });
+        assert.deepEqual([args.join(" "), result.code, result.stdout], [args.join(" "), 2, ""]);
+    }
 });
