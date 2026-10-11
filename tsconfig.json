@@ -10,6 +10,6 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.js", "bin/**/*.js", "test/**/*.js"],
+  "include": ["src/**/*.js", "bin/**/*.js", "test/**/*.js", "scripts/**/*.mjs"],
   "exclude": ["node_modules", "experiments", "tmp"]
 }

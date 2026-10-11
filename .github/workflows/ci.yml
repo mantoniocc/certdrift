@@ -3,13 +3,17 @@ on:
     pull_request:
     push:
         branches: [main]
+    # Packing and installing the tarball is also run by hand before a release.
+    workflow_dispatch:
 
 permissions:
     contents: read
 
 concurrency:
     cancel-in-progress: true
-    group: ${{github.workflow}}-${{github.ref}}
+    # The event is part of the group because a manual run on main would otherwise cancel the
+    # run a push to main started, and the other way round.
+    group: ${{github.workflow}}-${{github.event_name}}-${{github.ref}}
 
 jobs:
     check:
@@ -30,10 +34,36 @@ jobs:
 
             - run: npm run check
 
+    # What a consumer receives from `npm install`, which the tests, run against the working copy,
+    # cannot see. It does not run on a push to main: the pull request that landed there ran it.
+    package:
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        runs-on: ubuntu-latest
+        strategy:
+            matrix:
+                node: [24, 26]
+            fail-fast: false
+        steps:
+            - uses: actions/checkout@v7
+
+            - uses: actions/setup-node@v7
+              with:
+                node-version: ${{matrix.node}}
+                cache: npm
+
+            - run: npm ci
+
+            - run: npm run package:check
+
     ci-passed:
-        needs: check
+        needs: [check, package]
         if: always()
         runs-on: ubuntu-latest
         steps:
             - if: needs.check.result != 'success'
+              run: exit 1
+
+            # A job that did not run is `skipped`, which passes only where it is not meant to run.
+            # Anywhere else, a skipped or cancelled package job must not count as green.
+            - if: needs.package.result != 'success' && !(github.event_name == 'push' && needs.package.result == 'skipped')
               run: exit 1

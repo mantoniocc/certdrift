@@ -52,9 +52,10 @@
         "test": "node --test \"test/**/*.test.js\"",
         "typecheck": "tsc --noEmit",
         "check": "npm run typecheck && npm test",
-        "build:types": "tsc -p tsconfig.types.json",
+        "build:types": "node --eval \"fs.rmSync('types', { recursive: true, force: true })\" && tsc -p tsconfig.types.json",
         "prepack": "npm run build:types",
-        "fixtures": "bash scripts/generate.sh"
+        "fixtures": "bash scripts/generate.sh",
+        "package:check": "node scripts/package-check.mjs"
     },
     "engines": {
         "node": ">=24"
