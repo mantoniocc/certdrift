@@ -41,7 +41,7 @@ for (const { name, algorithm } of RSA_FIXTURES) {
 
 const examplesUrl = new URL("../schema/examples/observation/", import.meta.url);
 
-/** The key order the issue fixes, which the examples in schema/ show. */
+/** The key order the examples in schema/examples/observation/ show, which are the reference. */
 const TOP_LEVEL = ["contract", "format", "observation", "target", "certificates", "warnings"];
 const PER_CERTIFICATE = [
     "index", "kind", "selfSigned", "issuedBy", "subject", "issuer", "serial", "notBefore", "notAfter",
@@ -127,11 +127,12 @@ test("output ends in one newline and indents with two spaces", () => {
         const lines = bytes.slice(0, -1).split("\n");
         assert.equal(lines[0], "{", name);
         let previous = 0;
-        for (const line of lines.slice(1)) {
+        for (let i = 1; i < lines.length; i += 1) {
+            const line = lines[i];
             assert.equal(depth(line) % 2, 0, `${name}: ${line}`);
             // One level deeper only right after an opening bracket, and never more than one.
             assert.ok(depth(line) <= previous + 2, `${name}: ${line}`);
-            if (depth(line) === previous + 2) assert.match(lines[lines.indexOf(line) - 1] ?? "", /[[{]$/, name);
+            if (depth(line) === previous + 2) assert.match(lines[i - 1], /[[{]$/, name);
             previous = depth(line);
         }
     }
