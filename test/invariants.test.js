@@ -4,6 +4,8 @@
 //   1. The core (src/, except src/tls/) never imports node:fs or node:tls.
 //   2. The CLI (bin/) never imports node:crypto or node:tls.
 //   3. The library (all of src/) never uses process.argv, console.log or process.exit.
+//   4. The CLI (bin/) imports from src/ only the files package.json "exports" points to, so
+//      a library user can do with an import everything the command does.
 //
 // The checks read the source as text, so a match inside a comment or a string counts too:
 // write "the argument vector", not the global's name. They catch mistakes, not deliberate
@@ -13,6 +15,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { isBuiltin } from "node:module";
+import { dirname, join, normalize } from "node:path/posix";
 
 const root = new URL("../", import.meta.url);
 
@@ -106,6 +109,47 @@ function forbiddenUsages(files) {
     );
 }
 
+/**
+ * The files of src/ that a package.json `exports` map points to, whatever the condition
+ * (`default`, `types`, …) and however deep, as repository-relative paths. A target outside src/
+ * (the generated declarations) is not a source file and is left out. A target need not exist
+ * yet: the TLS entry point is allowed before it is written.
+ * @param {unknown} exports
+ * @returns {string[]}
+ */
+function exportedSources(exports) {
+    if (typeof exports === "string") return exports.startsWith("./src/") ? [normalize(exports)] : [];
+    if (typeof exports !== "object" || exports === null) return [];
+    return [...new Set(Object.values(exports).flatMap(exportedSources))].sort();
+}
+
+/**
+ * Every import of a file under src/, with the repository-relative path it resolves to and its
+ * line. Built-ins and packages are not imports of src/.
+ * @param {string} path Repository-relative path of the importing file.
+ * @param {string} text
+ * @returns {{ target: string, specifier: string, line: number }[]}
+ */
+function sourceImportsOf(path, text) {
+    return importsOf(text)
+        .filter((found) => found.specifier.startsWith("."))
+        .map((found) => ({ target: join(dirname(path), found.specifier), specifier: found.specifier, line: found.line }))
+        .filter((found) => found.target.startsWith("src/"));
+}
+
+/**
+ * Violations of "these files import from src/ only these files", one string per offending import.
+ * @param {string[]} files
+ * @param {string[]} allowed
+ */
+function forbiddenSourceImports(files, allowed) {
+    return files.flatMap((path) =>
+        sourceImportsOf(path, read(path))
+            .filter((found) => !allowed.includes(found.target))
+            .map((found) => `${path}:${found.line} imports "${found.specifier}", which package.json does not export`),
+    );
+}
+
 const library = sourceFiles("src");
 const core = library.filter((path) => !path.startsWith("src/tls/"));
 const cli = sourceFiles("bin");
@@ -159,4 +203,43 @@ test("bin/ never imports node:crypto or node:tls", () => {
 
 test("the library never uses process.argv, console.log or process.exit", () => {
     assert.deepEqual(forbiddenUsages(library), []);
+});
+
+test("the detector reads the exported source files of an exports map", () => {
+    const exports = {
+        ".": { types: "./types/index.d.ts", default: "./src/index.js" },
+        "./tls": { types: "./types/tls/index.d.ts", default: "./src/tls/index.js" },
+        "./schema/*": "./schema/*.json",
+        "./deep": { node: { import: "./src/./deep/main.js" } },
+    };
+    assert.deepEqual(exportedSources(exports), ["src/deep/main.js", "src/index.js", "src/tls/index.js"]);
+    assert.deepEqual(exportedSources("./bin/cli.js"), []);
+    assert.deepEqual(exportedSources(undefined), []);
+});
+
+test("the detector recognises every import that reaches into src/", () => {
+    const text = [
+        'import { inspect } from "../src/index.js";',
+        'import { chainOf } from "../src/chain.js";',
+        'export { connect } from "../src/tls/index.js";',
+        'const lazy = await import("../src/./names.js");',
+        'import { run } from "./cli.js";',
+        'import { readFile } from "node:fs/promises";',
+        'import { elsewhere } from "../scripts/other.js";',
+        "import {",
+        "    commonName,",
+        '} from "../src/names.js";',
+    ].join("\n");
+    assert.deepEqual(
+        sourceImportsOf("bin/certdrift.js", text).map((found) => `${found.line} ${found.target}`),
+        ["1 src/index.js", "2 src/chain.js", "3 src/tls/index.js", "4 src/names.js", "10 src/names.js"],
+    );
+    assert.deepEqual(sourceImportsOf("bin/deep/run.js", 'import "../../src/chain.js";').map((found) => found.target), ["src/chain.js"]);
+});
+
+test("bin/ imports from src/ only the files package.json exports", () => {
+    const { exports } = JSON.parse(read("package.json"));
+    const allowed = exportedSources(exports);
+    assert.ok(allowed.includes("src/index.js"), `package.json exports no src/index.js; found: ${allowed.join(", ")}`);
+    assert.deepEqual(forbiddenSourceImports(cli, allowed), []);
 });
