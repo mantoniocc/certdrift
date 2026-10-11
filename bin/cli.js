@@ -7,6 +7,7 @@ import {
     AmbiguousTargetError,
     EXTENDED_KEY_USAGE_OIDS,
 } from "../src/index.js";
+import { PathSyntaxError, labelOf, parsePath, printable, undeclaredAt, valueAt } from "./query.js";
 
 // The command orchestrates and presents. Everything that interprets a certificate is in the
 // library, and every value shown here comes from the observation or from its exports, so what
@@ -19,10 +20,23 @@ export const INSPECT_OPTIONS = /** @type {const} */ ({
     quiet: { type: "boolean", short: "q" },
     // A list so that a repeated flag can be refused: parseArgs would silently keep the last one.
     select: { type: "string", multiple: true },
+    // A list for the same reason as `select`.
+    query: { type: "string", multiple: true },
     help: { type: "boolean", short: "h" },
 });
 
-const USAGE = "Usage: certdrift inspect [--json | --verbose | --quiet] [--select <sha256>] <path | ->";
+/**
+ * The schema of the document this command prints, and the name its messages give it. It is read
+ * from the package, next to this file, and never from the working directory: the command must
+ * answer the same from any directory and once the package is installed elsewhere.
+ */
+const OBSERVATION_SCHEMA = { name: "observation", url: new URL("../schema/observation.schema.json", import.meta.url) };
+
+const USAGE = "Usage: certdrift inspect [--json | --verbose | --quiet | --query <path>] [--select <sha256>] <path | ->";
+
+// PENDING: name `certdrift check` once that command exists
+// The help says "the checking command" until then, because naming a command that can not be run
+// yet would send people to something that fails.
 
 const HELP = `certdrift inspects X.509 certificates.
 
@@ -36,16 +50,39 @@ Options:
   -v, --verbose      Add the full names, the serial, the public key fingerprint, the OIDs
                      beside the usage names and the detail of every certificate in the chain.
   -q, --quiet        Print nothing. The exit code still says what happened.
+  --query <path>     Print one value of the observation, not the whole of it. See below.
   --select <sha256>  Choose the certificate when a bundle has several that could be the one it
                      is about. A prefix of its sha256 is enough if it is unique.
   -h, --help         Print this text.
+
+Extracting a value:
+  To extract a value, use --query. To make a decision, use the checking command: --query only
+  reads, and a value that is missing is not a failure of the certificate.
+
+    certdrift inspect --query 'certificates[0].notAfter' server.pem
+
+  A path is field names separated by dots, and numeric indices in square brackets. Nothing
+  else: no filters, functions or expressions. Quote it, because a shell reads square brackets as
+  a pattern.
+
+  A string prints without quotes. A number, true, false and null print as JSON, and an array or
+  an object as compact JSON on one line.
+
+  The path is checked against the observation's schema before anything is read. A path the
+  schema does not declare, such as a typo, exits 2 and prints nothing on standard output. A path
+  it declares that has no value in this observation, such as an index past the end of a list,
+  exits 0 and prints nothing on standard output, with a note on standard error.
+
+  The contract tolerates fields it does not declare, so an observation may hold one. A field the
+  contract tolerates but the schema does not declare does not exist for --query.
 
 The output is coloured unless the NO_COLOR environment variable is set to a non-empty value.
 Nothing else, such as whether a terminal is attached, changes it.
 
 Exit codes:
   0  Success.
-  2  Misuse, or a bundle whose certificate is ambiguous (the candidates are listed).
+  2  Misuse, a --query path the schema does not declare, or a bundle whose certificate is
+     ambiguous (the candidates are listed).
   3  The file is missing or unreadable, or the material is not a certificate.
 `;
 
@@ -114,6 +151,29 @@ export async function main(argv, { env, stdin, stdout, stderr }) {
     if (values.select !== undefined && values.select.length > 1) return misuse("--select was given more than once");
     const select = values.select?.[0];
     if (select === "") return misuse("--select needs the start of a sha256, and it is empty");
+    if (values.query !== undefined && values.query.length > 1) return misuse("--query was given more than once");
+    const query = values.query?.[0];
+    // --query prints one value, so a flag that changes what the whole document looks like has
+    // nothing to act on. Taking one over the other without a word would hide the mistake.
+    if (query !== undefined && (values.json || values.verbose)) return misuse("--query can not be combined with --json or --verbose");
+
+    // The path is checked before the material is read, so that a typo is a misuse whatever the
+    // file holds, and never waits on standard input.
+    /** @type {import("./query.js").Step[] | undefined} */
+    let steps;
+    if (query !== undefined) {
+        try {
+            steps = parsePath(query);
+        } catch (error) {
+            if (error instanceof PathSyntaxError) return misuse(`--query: ${error.message}`);
+            throw error;
+        }
+        // A schema that can not be read means a broken installation, which is neither misuse
+        // nor bad material, so it is not caught.
+        const schema = JSON.parse(await readFile(OBSERVATION_SCHEMA.url, "utf8"));
+        const unknown = undeclaredAt(schema, steps);
+        if (unknown !== -1) return misuse(`unknown field in ${labelOf(OBSERVATION_SCHEMA.name, schema)}: ${steps[unknown].through}`);
+    }
 
     const [path] = positionals;
     const source = path === "-" ? { kind: "stdin", ref: "-" } : { kind: "file", ref: path };
@@ -146,7 +206,12 @@ export async function main(argv, { env, stdin, stdout, stderr }) {
         throw error;
     }
 
-    if (values.json) out(serializeObservation(observation));
+    if (steps !== undefined) {
+        // The value comes from the document --json prints, so the two can not disagree.
+        const found = valueAt(JSON.parse(serializeObservation(observation)), steps);
+        if (found.found) out(printable(found.value));
+        else err(`certdrift: no value for ${safe(query ?? "")}: ${safe(found.reason)}\n`);
+    } else if (values.json) out(serializeObservation(observation));
     else out(present(observation, { verbose: values.verbose === true, colour: !isSet(env.NO_COLOR) }));
     return 0;
 }
