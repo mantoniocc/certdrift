@@ -67,14 +67,18 @@ import { validityDate } from "./dates.js";
  * @param {string | Uint8Array} material One certificate or several, as PEM (a string, or bytes)
  *   or as a single DER certificate (bytes). Text between PEM blocks is ignored, so the output
  *   of `openssl s_client -showcerts` works as it is.
- * @param {{ source?: Source, at?: Date }} [options]
+ * @param {{ source?: Source, at?: Date, select?: string }} [options]
  *   `source` defaults to `{ kind: "bytes" }`. `at` defaults to the moment of the call and is
- *   cut to the whole second, which is all a certificate date can express.
+ *   cut to the whole second, which is all a certificate date can express. `select` is the
+ *   start of the sha256 of the certificate the observation is about, in either case: it
+ *   resolves a material that has several candidates, and it must also match the target of one
+ *   that has a single candidate. It only chooses `target`; the observation does not record it.
  * @returns {Observation}
  * @throws {import("./errors.js").ParseError} The material is empty, or one of its blocks is not
  *   a readable certificate. The message says which input block, counting from 1.
  * @throws {import("./errors.js").AmbiguousTargetError} More than one certificate signs no other
- *   one, or every one signs another. It lists the candidates.
+ *   one, or every one signs another, and `select` is absent or does not pick exactly one of
+ *   them. It lists the candidates.
  * @throws {TypeError} An argument has the wrong type.
  */
 export function inspect(material, options) {
@@ -86,8 +90,9 @@ export function inspect(material, options) {
     }
     const at = instantOf(options?.at);
     const source = sourceOf(options?.source);
+    const select = selectionOf(options?.select);
 
-    const chain = chainOf(certificatesIn(material));
+    const chain = chainOf(certificatesIn(material), select);
     const names = chain.members.map(({ certificate, block }) => subjectAltNames(certificate.subjectAltName, block));
     const certificates = chain.members.map((read, index) => describe(read, index, chain.issuedBy[index], names[index].names, at));
     const unrepresented = names.flatMap(({ unrepresented: found }, index) => found.map(({ type, count }) => ({
@@ -185,4 +190,17 @@ function sourceOf(given) {
         throw new TypeError("options.source must be an object with a non-empty string kind");
     }
     return { ...given };
+}
+
+/**
+ * An empty prefix would match every candidate, which is what an unset variable in a caller
+ * produces, so it is refused instead of picking the only candidate by accident.
+ * @param {string | undefined} given
+ */
+function selectionOf(given) {
+    if (given === undefined) return undefined;
+    if (typeof given !== "string" || given === "") {
+        throw new TypeError("options.select must be a non-empty string");
+    }
+    return given;
 }

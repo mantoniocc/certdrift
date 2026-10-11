@@ -7,6 +7,7 @@ import { derivedOf } from "../src/derived.js";
 import { validityDate } from "../src/dates.js";
 import { distinguishedName } from "../src/names.js";
 import { extendedKeyUsage } from "../src/usage.js";
+import { EXTENDED_KEY_USAGE_OIDS } from "../src/index.js";
 import { publicKeyOf } from "../src/key.js";
 import { validatorFor } from "./helpers/schema.js";
 
@@ -482,6 +483,21 @@ test("eku maps known OIDs to names, leaves the OID as text otherwise, is sorted,
             ]),
             ["OCSPSigning", "clientAuth", "codeSigning", "emailProtection", "serverAuth", "timeStamping"],
         );
+    });
+
+    await t.test("EXTENDED_KEY_USAGE_OIDS gives the OID of each of the six names, and extendedKeyUsage reads it back", () => {
+        assert.deepEqual({ ...EXTENDED_KEY_USAGE_OIDS }, {
+            serverAuth: "1.3.6.1.5.5.7.3.1",
+            clientAuth: "1.3.6.1.5.5.7.3.2",
+            codeSigning: "1.3.6.1.5.5.7.3.3",
+            emailProtection: "1.3.6.1.5.5.7.3.4",
+            timeStamping: "1.3.6.1.5.5.7.3.8",
+            OCSPSigning: "1.3.6.1.5.5.7.3.9",
+        });
+        for (const [name, oid] of Object.entries(EXTENDED_KEY_USAGE_OIDS)) {
+            assert.deepEqual(extendedKeyUsage([oid]), [name]);
+        }
+        assert.equal(Object.isFrozen(EXTENDED_KEY_USAGE_OIDS), true);
     });
 
     await t.test("an OID with no name stays as text, including anyExtendedKeyUsage", () => {

@@ -1,12 +1,18 @@
-/** The Extended Key Usage OIDs the contract names. Any other OID stays as text. */
-const NAMES = new Map([
-    ["1.3.6.1.5.5.7.3.1", "serverAuth"],
-    ["1.3.6.1.5.5.7.3.2", "clientAuth"],
-    ["1.3.6.1.5.5.7.3.3", "codeSigning"],
-    ["1.3.6.1.5.5.7.3.4", "emailProtection"],
-    ["1.3.6.1.5.5.7.3.8", "timeStamping"],
-    ["1.3.6.1.5.5.7.3.9", "OCSPSigning"],
-]);
+/**
+ * The Extended Key Usage OIDs the contract names, by name. Any other OID stays as text in the
+ * observation.
+ */
+export const EXTENDED_KEY_USAGE_OIDS = Object.freeze({
+    serverAuth: "1.3.6.1.5.5.7.3.1",
+    clientAuth: "1.3.6.1.5.5.7.3.2",
+    codeSigning: "1.3.6.1.5.5.7.3.3",
+    emailProtection: "1.3.6.1.5.5.7.3.4",
+    timeStamping: "1.3.6.1.5.5.7.3.8",
+    OCSPSigning: "1.3.6.1.5.5.7.3.9",
+});
+
+/** @type {Map<string, string>} */
+const NAMES = new Map(Object.entries(EXTENDED_KEY_USAGE_OIDS).map(([name, oid]) => [oid, name]));
 
 /**
  * The extended key usages of a certificate, sorted. Node.js exposes them as `keyUsage`, a

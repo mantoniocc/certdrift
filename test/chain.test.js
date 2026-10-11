@@ -323,3 +323,85 @@ test("AmbiguousTargetError is an Error that carries its candidates", () => {
     assert.ok(error instanceof Error);
     assert.deepEqual([error.name, error.message, error.candidates], ["AmbiguousTargetError", "two candidates", candidates]);
 });
+
+// `select` is the start of a candidate's sha256, and it is how a material with several
+// candidates is resolved by someone who knows which certificate it is about.
+
+/** @param {string} name @param {number} length */
+function prefix(name, length) {
+    return fingerprint(name).slice(0, length);
+}
+
+test("select picks the candidate its prefix uniquely identifies, in either case", () => {
+    const material = fixture("bundle-two-leaves.pem");
+    for (const name of ["leaf-rsa.pem", "leaf-p256.pem"]) {
+        const full = fingerprint(name);
+        for (const select of [full.slice(0, 12), full.slice(0, 12).toUpperCase(), full]) {
+            const observation = inspect(material, { at: AT, select });
+            assert.equal(targetHash(observation), full);
+            assert.deepEqual(Object.keys(observation.observation.source), ["kind"], "the selection is not recorded");
+        }
+    }
+});
+
+test("select that matches no candidate throws an AmbiguousTargetError with the candidates", () => {
+    const material = fixture("bundle-two-leaves.pem");
+    const candidates = [
+        { sha256: fingerprint("leaf-rsa.pem"), cn: "rsa.example" },
+        { sha256: fingerprint("leaf-p256.pem"), cn: "p256.example" },
+    ];
+
+    // The intermediate is in the material but signs the leaves, so it is no candidate.
+    for (const select of [prefix("intermediate.pem", 16), "zz", "0".repeat(65)]) {
+        const error = ambiguity(() => inspect(material, { at: AT, select }));
+        assert.deepEqual(error.candidates, candidates);
+        assert.match(error.message, /matches no candidate/);
+    }
+});
+
+test("select that matches several candidates throws an AmbiguousTargetError, and a longer prefix resolves it", () => {
+    // There are more leaf fixtures than hexadecimal digits, so two of them share a first digit
+    // whatever keys the generator made. None of them signs another one: all are candidates.
+    const leaves = SINGLES.filter((name) => name.startsWith("leaf-"));
+    assert.ok(leaves.length > 16);
+    const sharing = leaves.flatMap((one, i) => leaves.slice(i + 1).map((other) => [one, other])).find(([one, other]) => fingerprint(one)[0] === fingerprint(other)[0]);
+    const [one, other] = sharing ?? assert.fail("no two leaves share a first digit");
+    const digit = fingerprint(one)[0];
+
+    const material = `${pem(one)}\n${pem(other)}`;
+    const error = ambiguity(() => inspect(material, { at: AT, select: digit }));
+    assert.deepEqual(error.candidates.map((c) => c.sha256), [fingerprint(one), fingerprint(other)]);
+    assert.match(error.message, /matches 2 candidates/);
+
+    assert.equal(targetHash(inspect(material, { at: AT, select: prefix(other, 12) })), fingerprint(other));
+});
+
+test("select that does not match the target of an unambiguous material throws instead of inspecting another certificate", () => {
+    const material = fixture("bundle-ordered.pem");
+    const leaf = fingerprint("leaf-p256.pem");
+    assert.equal(targetHash(inspect(material, { at: AT, select: leaf.slice(0, 8) })), leaf);
+
+    const error = ambiguity(() => inspect(material, { at: AT, select: prefix("root-ca.pem", 16) }));
+    assert.deepEqual(error.candidates, [{ sha256: leaf, cn: "p256.example" }]);
+});
+
+test("select resolves a material where every certificate signs another one", () => {
+    const material = fixture("bundle-renewed-root.pem");
+    for (const name of ["root-ca.pem", "root-ca-renewed.pem"]) {
+        assert.equal(targetHash(inspect(material, { at: AT, select: prefix(name, 20) })), fingerprint(name));
+    }
+    const error = ambiguity(() => inspect(material, { at: AT, select: "ff".repeat(32) }));
+    assert.equal(error.candidates.length, 2);
+});
+
+test("select can not make a certificate that signs another one the target", () => {
+    const error = ambiguity(() => inspect(fixture("bundle-ordered.pem"), { at: AT, select: prefix("intermediate.pem", 20) }));
+    assert.deepEqual(error.candidates.map((c) => c.sha256), [fingerprint("leaf-p256.pem")]);
+});
+
+test("select must be a non-empty string", () => {
+    for (const select of ["", 12, null, ["ab"], {}]) {
+        assert.throws(() => inspect(fixture("leaf-p256.pem"), { at: AT, select: /** @type {any} */ (select) }), TypeError);
+    }
+    assert.doesNotThrow(() => inspect(fixture("leaf-p256.pem"), { at: AT, select: undefined }));
+});
