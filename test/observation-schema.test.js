@@ -106,3 +106,22 @@ test("a different contract version fails validation", () => {
     document.contract = 2;
     assert.ok(errorsOf(document).some((e) => e.startsWith("/contract")));
 });
+
+const schema = readJson(new URL("../schema/observation.schema.json", import.meta.url));
+
+test("the description of kind says ca needs basicConstraints marking a CA and keyCertSign when Key Usage is present, that anything else is end-entity, and that keyCertSign is the bit that allows a key to sign certificates", () => {
+    const { description } = schema.$defs.certificate.properties.kind;
+    assert.match(description, /\bca\b[^;]*basicConstraints marks the certificate as a CA/);
+    assert.match(description, /if a Key Usage extension is present, it includes keyCertSign/);
+    assert.match(description, /keyCertSign, the bit that allows a key to sign certificates/);
+    assert.match(description, /end-entity for anything else/);
+    assert.match(description, /marked as a CA whose Key Usage lacks keyCertSign/);
+});
+
+test("kind keeps its name, type and place among the required fields, and the contract stays 1", () => {
+    const { description, ...kind } = schema.$defs.certificate.properties.kind;
+    assert.equal(typeof description, "string");
+    assert.deepEqual(kind, { type: "string", minLength: 1 });
+    assert.ok(schema.$defs.certificate.required.includes("kind"));
+    assert.equal(schema.properties.contract.const, 1);
+});
