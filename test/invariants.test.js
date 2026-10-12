@@ -12,6 +12,10 @@
 //   3. The library (all of src/) never uses process.argv, console.log or process.exit.
 //   4. The CLI (bin/) imports from src/ only the files package.json "exports" points to, so
 //      a library user can do with an import everything the command does.
+//   5. The TLS module (src/tls/) imports from the rest of src/ only types, written in JSDoc
+//      comments, so loading it runs no core code; and it imports nothing from bin/, not even a
+//      type. The module is the only one allowed to open sockets, which is a reason to keep it
+//      from depending on what the core does, and the core from depending on it (rule 1).
 //
 // The checks read the source as text, so a match inside a comment or a string counts too:
 // write "the argument vector", not the global's name. They catch mistakes, not deliberate
@@ -82,14 +86,22 @@ function builtinOf(specifier) {
 }
 
 /**
- * Every module a source text imports, with the line it appears on.
+ * Every module a source text imports, with the line it appears on and whether it is only a type.
+ *
+ * An import is only a type when its line starts, after any spaces, with a documentation comment
+ * (`/**`) or one of its continuation lines (`*`): that is where JSDoc writes `@import` and
+ * `import("…")` types, and nothing there runs. A comment that starts after some code on the same
+ * line, or a line comment, does not count: the import is then taken as one that runs, which
+ * fails on the safe side.
  * @param {string} text
- * @returns {{ builtin: string | null, specifier: string, line: number }[]}
+ * @returns {{ builtin: string | null, specifier: string, line: number, typeOnly: boolean }[]}
  */
 function importsOf(text) {
+    const lines = text.split("\n");
     return [...text.matchAll(SPECIFIER)].map((match) => {
         const specifier = match.groups?.plain ?? match.groups?.called ?? "";
-        return { builtin: builtinOf(specifier), specifier, line: lineOf(text, match.index) };
+        const line = lineOf(text, match.index);
+        return { builtin: builtinOf(specifier), specifier, line, typeOnly: /^\s*(?:\/\*\*|\*)/.test(lines[line - 1]) };
     });
 }
 
@@ -146,6 +158,35 @@ function refusedInCore(path, text, allowed) {
  */
 function importsOutsideCore(files) {
     return files.flatMap((path) => refusedInCore(path, read(path), CORE_BUILTINS));
+}
+
+/**
+ * Whether a repository-relative path belongs to the TLS module: src/tls/.
+ * @param {string} path
+ */
+function isTlsFile(path) {
+    return /^src\/tls\//.test(path);
+}
+
+/**
+ * Violations of rule 5 in a source text of the TLS module, one string per offending import.
+ * Built-ins and other packages are not its business. Whatever resolves into bin/ is refused,
+ * type or not. A type may come from anywhere else, and an import that runs may come only from
+ * the module's own files: not from the core, not from outside src/, and not from the package
+ * itself, which is the core and the module again by another name.
+ * @param {string} path Repository-relative path of the importing file.
+ * @param {string} text
+ */
+function refusedInTls(path, text) {
+    return importsOf(text)
+        .filter((found) => {
+            if (found.specifier === "certdrift" || found.specifier.startsWith("certdrift/")) return !found.typeOnly;
+            if (!found.specifier.startsWith(".")) return false;
+            const target = join(dirname(path), found.specifier);
+            if (target === "bin" || target.startsWith("bin/") || target.startsWith("../bin/")) return true;
+            return !found.typeOnly && !isTlsFile(target);
+        })
+        .map((found) => `${path}:${found.line} imports "${found.specifier}"`);
 }
 
 const USAGE = /\bprocess\.argv\b|\bconsole\.log\b|\bprocess\.exit\b/g;
@@ -212,6 +253,7 @@ function forbiddenSourceImports(files, allowed) {
 
 const library = sourceFiles("src");
 const core = library.filter(isCoreFile);
+const tlsModule = library.filter(isTlsFile);
 const cli = sourceFiles("bin");
 
 // A scan that finds no files passes every rule below without checking anything.
@@ -384,6 +426,94 @@ test("the core never imports a file outside the core", () => {
     assert.deepEqual(refusedInCore("src/deep/parse.js", 'import "../tls/index.js";\nimport "../errors.js";', CORE_BUILTINS), [
         'src/deep/parse.js:1 imports "../tls/index.js"',
     ]);
+});
+
+test("the detector tells a type-only import in a documentation comment from one that runs", () => {
+    const text = [
+        '/** @import { Source } from "../index.js" */',
+        "/**",
+        ' * @param {import("../inspect.js").Options} options',
+        ' * @returns {Promise<import("../index.js").Observation>}',
+        " */",
+        '    /** @type {import("../chain.js").Chain} */',
+        'import { inspect } from "../inspect.js";',
+        'const lazy = await import("../index.js");',
+        '// import("../index.js") named in a line comment',
+        'const typed = /** @type {import("../index.js").Source} */ ({});',
+        'export { x } from "../chain.js"; /** import("../names.js") */',
+    ].join("\n");
+    assert.deepEqual(
+        importsOf(text).map((found) => `${found.line} ${found.typeOnly ? "type" : "runs"}`),
+        ["1 type", "3 type", "4 type", "6 type", "7 runs", "8 runs", "9 runs", "10 runs", "11 runs", "11 runs"],
+    );
+});
+
+test("the TLS module imports from the rest of src/ only types, and nothing from bin/", () => {
+    assert.deepEqual(tlsModule.flatMap((path) => refusedInTls(path, read(path))), []);
+});
+
+test("the rule for src/tls/ refuses a runtime import of the core, of bin/ or of the package itself in every form, and passes a type, the module's own files and built-ins", () => {
+    const text = [
+        'import { inspect } from "../inspect.js";',
+        'export { inspect } from "../index.js";',
+        'import "../chain.js";',
+        'const lazy = await import("../index.js");',
+        'const legacy = require("../san.js");',
+        "import {",
+        "    ParseError,",
+        '} from "../errors.js";',
+        'import { cli } from "../../bin/cli.js";',
+        'import { certdrift } from "certdrift";',
+        'import { fetchChain } from "certdrift/tls";',
+        'import { helper } from "../../scripts/helper.mjs";',
+        'import { targetOf } from "./target.js";',
+        'import { deeper } from "./deep/more.js";',
+        'import tls from "node:tls";',
+        'import extra from "fs-extra";',
+    ].join("\n");
+    assert.deepEqual(refusedInTls("src/tls/index.js", text), [
+        'src/tls/index.js:1 imports "../inspect.js"',
+        'src/tls/index.js:2 imports "../index.js"',
+        'src/tls/index.js:3 imports "../chain.js"',
+        'src/tls/index.js:4 imports "../index.js"',
+        'src/tls/index.js:5 imports "../san.js"',
+        'src/tls/index.js:8 imports "../errors.js"',
+        'src/tls/index.js:9 imports "../../bin/cli.js"',
+        'src/tls/index.js:10 imports "certdrift"',
+        'src/tls/index.js:11 imports "certdrift/tls"',
+        'src/tls/index.js:12 imports "../../scripts/helper.mjs"',
+    ]);
+
+    const types = [
+        '/** @import { Source } from "../index.js" */',
+        "/**",
+        ' * @returns {Promise<import("../inspect.js").Options>}',
+        ' * @param {import("certdrift").Source} source',
+        " */",
+    ].join("\n");
+    assert.deepEqual(refusedInTls("src/tls/index.js", types), []);
+
+    // A type from bin/ is refused too: the module must not know about the command that uses it.
+    const fromBin = [
+        '/** @import { Options } from "../../bin/cli.js" */',
+        ' * @param {import("../../bin/query.js").Path} path',
+    ].join("\n");
+    assert.deepEqual(refusedInTls("src/tls/index.js", fromBin), [
+        'src/tls/index.js:1 imports "../../bin/cli.js"',
+        'src/tls/index.js:2 imports "../../bin/query.js"',
+    ]);
+
+    // Relative to where the file is: from a deeper directory, ../ no longer leaves the module.
+    assert.deepEqual(refusedInTls("src/tls/deep/socket.js", 'import "../target.js";\nimport "../../inspect.js";'), [
+        'src/tls/deep/socket.js:2 imports "../../inspect.js"',
+    ]);
+});
+
+test("the scan finds the TLS module, so the rule on the argument vector, console output and exiting covers it", () => {
+    assert.ok(tlsModule.includes("src/tls/index.js"), `src/tls/index.js not found; scanned: ${library.join(", ")}`);
+    assert.ok(library.includes("src/tls/index.js"));
+    assert.equal(core.includes("src/tls/index.js"), false);
+    assert.deepEqual(forbiddenUsages(tlsModule), []);
 });
 
 test("bin/ never imports node:crypto or node:tls", () => {
