@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rootCertificates } from "node:tls";
 import { inspect, serializeObservation, AmbiguousTargetError } from "../src/index.js";
-import { INSPECT_OPTIONS, present } from "../bin/cli.js";
+import { derivedOf } from "../src/derived.js";
+import { INSPECT_OPTIONS, present, timeRemaining } from "../bin/cli.js";
 import { validatorFor } from "./helpers/schema.js";
 
 // The command is run as a child process, the way a person runs it, so that the shebang, the
@@ -22,6 +23,8 @@ const BIN = new URL("bin/certdrift.js", root).pathname;
 const errorsOf = validatorFor("observation");
 const AT = new Date("2026-09-15T14:02:11Z");
 const ESC = String.fromCharCode(27);
+/** How much time a certificate has left, as the command words it. */
+const TIME_REMAINING = /-?\d+(?:\.\d)? days?, (?:-?\d+% of the lifetime used|no lifetime to measure)/g;
 const COLOUR = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 
 /** @param {string} name File name in test/fixtures/. */
@@ -103,16 +106,58 @@ function expected(name) {
 }
 
 /**
- * The text without the lines that depend on the clock, so two runs can be compared.
+ * The text with the time remaining of every certificate, which depends on the clock, replaced by
+ * a mark, so two runs can be compared. The target's line and every line of the chain are kept.
  * @param {string} text
  */
-function withoutRemaining(text) {
-    return text.split("\n").filter((line) => !/^\s+remaining\s/.test(line)).join("\n");
+function withoutTimeRemaining(text) {
+    return text.replace(TIME_REMAINING, "…");
 }
 
 /** @param {string} name */
 function sha256Of(name) {
     return expected(name).certificates[expected(name).target].sha256;
+}
+
+/**
+ * The one-line summaries of the chain in a default readable output without colour.
+ * @param {string} text
+ */
+function chainLinesOf(text) {
+    return text.split("\n").filter((line) => /^  \[\d+\] /.test(line));
+}
+
+/**
+ * The `remaining` line of one certificate in a `--verbose` output without colour.
+ * @param {string} text
+ * @param {number} index
+ */
+function remainingOf(text, index) {
+    const lines = text.split("\n");
+    const start = lines.findIndex((line) => line.startsWith(`  certificate [${index}] `));
+    return lines.slice(start).find((line) => line.startsWith("  remaining   "))?.slice(14);
+}
+
+/**
+ * A target and two certificates beside it whose validity the generator writes with fixed dates:
+ * one that has no lifetime to measure (it ends the day it starts) and one that ended in April
+ * 2025. Neither signs the target, so `select` is what picks it.
+ * @param {Date} at
+ */
+function mixedAt(at) {
+    const names = ["leaf-p256.pem", "leaf-zero-validity.pem", "leaf-expired.pem"];
+    return inspect(Buffer.concat(names.map(fixture)), { at, select: sha256Of("leaf-p256.pem") });
+}
+
+/** What follows the relation on a chain line, up to the fingerprint. */
+const VALIDITY_PART = /^until \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ, -?\d+(?:\.\d)? days?, (?:-?\d+% of the lifetime used|no lifetime to measure)$/;
+
+/**
+ * The part of a chain line between the relation and the fingerprint.
+ * @param {string} line
+ */
+function validityPartOf(line) {
+    return line.replace(/^.*?\((?:self-signed|issued by [^)]*|issuer not in the material)\)  /, "").replace(/  [0-9a-f]{64}$/, "");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -231,6 +276,17 @@ test("dates are shown in UTC, whatever the time zone", async () => {
         const { stdout } = await run(["inspect", typed("leaf-p256.pem")], { cwd: new URL(root).pathname, env: { TZ } });
         assert.ok(stdout.includes(`  validity    ${want.notBefore} to ${want.notAfter}\n`), `${TZ}:\n${stdout}`);
     }
+
+    // The end of validity on a chain line is in UTC too.
+    const ordered = expected("bundle-ordered.pem");
+    for (const TZ of ["UTC", "Pacific/Auckland", "America/Los_Angeles"]) {
+        const { stdout } = await run(["inspect", typed("bundle-ordered.pem")], { cwd: new URL(root).pathname, env: { TZ } });
+        const lines = chainLinesOf(stdout);
+        assert.equal(lines.length, 2);
+        ordered.certificates.slice(1).forEach((certificate, position) => {
+            assert.ok(lines[position].includes(`  until ${certificate.notAfter}, `), `${TZ}:\n${lines[position]}`);
+        });
+    }
 });
 
 test("--verbose adds the full names, serial, public key fingerprint, usage OIDs and every chain certificate in detail", async () => {
@@ -289,6 +345,193 @@ test("lifetimeFraction is shown as a percentage, and nothing says whether a cert
     for (const [days, fraction] of [[-3.5, 1.1], [100, 0.1], [0, null]]) {
         assert.equal(/expired|\bvalid\b|\bok\b/i.test(shown(days ?? 0, fraction)), false);
     }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The chain lines
+
+const BUNDLES = ["bundle-ordered.pem", "bundle-shuffled.pem", "bundle-cross-signed.pem", "bundle-duplicates.pem"];
+
+test("each chain line shows when that certificate's validity ends and the time remaining, worded exactly as the target's remaining line", () => {
+    for (const name of BUNDLES) {
+        const observation = expected(name);
+        const plain = present(observation, { verbose: false, colour: false });
+        const verbose = present(observation, { verbose: true, colour: false });
+        const others = observation.certificates.filter((certificate) => certificate.index !== observation.target);
+        const lines = chainLinesOf(plain);
+        assert.equal(lines.length, others.length, name);
+        others.forEach((certificate, position) => {
+            // The words come from the same certificate's own `remaining` line, as --verbose prints it.
+            const remaining = remainingOf(verbose, certificate.index);
+            assert.ok(remaining?.length, `${name} [${certificate.index}] has a remaining line`);
+            assert.ok(lines[position].includes(`  until ${certificate.notAfter}, ${remaining}  `), `${name}:\n${lines[position]}`);
+        });
+    }
+});
+
+test("the time remaining is composed by one function, timeRemaining, for the target and for every chain line", () => {
+    const base = expected("bundle-ordered.pem");
+    const cases = /** @type {{ daysRemaining: number, lifetimeFraction: number | null }[]} */ ([
+        { daysRemaining: 1, lifetimeFraction: 0.5 },
+        { daysRemaining: 44.4, lifetimeFraction: 0.29 },
+        { daysRemaining: -3.5, lifetimeFraction: 1.1 },
+        { daysRemaining: 0, lifetimeFraction: null },
+        { daysRemaining: 100, lifetimeFraction: -0.11 },
+    ]);
+    for (const derived of cases) {
+        const observation = structuredClone(base);
+        for (const certificate of observation.certificates) certificate.derived = { ...derived };
+        const { at } = observation.observation;
+        const lines = present(observation, { verbose: false, colour: false }).split("\n");
+        for (const certificate of observation.certificates) {
+            const text = timeRemaining(certificate, at);
+            assert.ok(text.length > 0);
+            if (certificate.index === observation.target) {
+                assert.ok(lines.includes(`  remaining   ${text}`), `target ${JSON.stringify(derived)}`);
+            } else {
+                const line = lines.find((candidate) => candidate.startsWith(`  [${certificate.index}] `));
+                assert.ok(line?.includes(`  until ${certificate.notAfter}, ${text}  `), `[${certificate.index}] ${JSON.stringify(derived)}:\n${line}`);
+            }
+        }
+    }
+});
+
+test("a chain line still starts with [index], kind and common name and ends with the fingerprint, with the validity between them", () => {
+    for (const name of BUNDLES) {
+        const observation = expected(name);
+        const lines = chainLinesOf(present(observation, { verbose: false, colour: false }));
+        const others = observation.certificates.filter((certificate) => certificate.index !== observation.target);
+        others.forEach((certificate, position) => {
+            const line = lines[position];
+            const start = `  [${certificate.index}] ${certificate.kind}  ${certificate.subject.cn}  (`;
+            assert.ok(line.startsWith(start), `${name}:\n${line}`);
+            assert.ok(line.endsWith(`  ${certificate.sha256}`), `${name}:\n${line}`);
+            const middle = line.slice(start.length - 1, line.length - certificate.sha256.length - 2);
+            assert.match(middle, /^\([^)]*\)  until \S+, /, name);
+            assert.ok(middle.includes(`  until ${certificate.notAfter}, `), name);
+        });
+    }
+});
+
+test("a chain certificate with no lifetime to measure, one already expired and one not yet valid each read correctly", () => {
+    /** @param {string} iso */
+    const chainAt = (iso) => chainLinesOf(present(mixedAt(new Date(iso)), { verbose: false, colour: false })).map(validityPartOf);
+
+    // These two certificates have fixed dates, so the whole text can be written out.
+    assert.deepEqual(chainAt("2026-09-15T14:02:11Z"), [
+        "until 2026-01-01T00:00:00Z, -257.6 days, no lifetime to measure",
+        "until 2025-04-01T00:00:00Z, -532.6 days, 692% of the lifetime used",
+    ]);
+    // Before the second one starts, it has its whole lifetime ahead and a negative fraction.
+    assert.deepEqual(chainAt("2024-12-22T00:00:00Z"), [
+        "until 2026-01-01T00:00:00Z, 375 days, no lifetime to measure",
+        "until 2025-04-01T00:00:00Z, 100 days, -11% of the lifetime used",
+    ]);
+});
+
+test("a chain line states a date and a number and says nothing about the certificate being valid or expired", () => {
+    const observations = [
+        mixedAt(new Date("2026-09-15T14:02:11Z")),
+        mixedAt(new Date("2024-12-22T00:00:00Z")),
+        mixedAt(new Date("2025-03-31T23:00:00Z")),
+    ];
+    const ordered = expected("bundle-ordered.pem");
+    // An intermediate that ended ten days ago and one that has not started.
+    for (const offset of [864_000_000, -864_000_000]) {
+        const end = Date.parse(ordered.certificates[1].notAfter);
+        observations.push(inspect(fixture("bundle-ordered.pem"), { at: new Date(end + offset) }));
+    }
+    for (const observation of observations) {
+        const text = present(observation, { verbose: false, colour: false });
+        const lines = chainLinesOf(text);
+        assert.ok(lines.length >= 2);
+        for (const line of lines) assert.match(validityPartOf(line), VALIDITY_PART, line);
+    }
+    // The names of these certificates are the ones that say "expired", so the words are searched in
+    // a material whose names say nothing.
+    for (const observation of observations.slice(3)) {
+        const text = present(observation, { verbose: false, colour: false });
+        assert.equal(/expired|\bvalid\b|\bok\b/i.test(text), false, text);
+    }
+});
+
+test("an hour after a chain certificate's validity ends it reads the same as an hour before, because only the dates can tell them apart", () => {
+    const base = expected("bundle-ordered.pem");
+    const { notAfter } = base.certificates[1];
+    /** @param {number} offset */
+    const lineAt = (offset) => {
+        const observation = inspect(fixture("bundle-ordered.pem"), { at: new Date(Date.parse(notAfter) + offset) });
+        return chainLinesOf(present(observation, { verbose: false, colour: false })).find((line) => line.startsWith("  [1] "));
+    };
+    const hour = 3_600_000;
+    assert.equal(lineAt(hour), lineAt(-hour));
+    assert.ok(lineAt(hour)?.includes(`  until ${notAfter}, 0 days, 100% of the lifetime used  `), lineAt(hour));
+});
+
+test("a chain certificate that ends in the year 9999 or that began before 1970 still reads as one line of the same shape", () => {
+    const base = expected("bundle-ordered.pem");
+    for (const [notBefore, notAfter] of [["2026-01-01T00:00:00Z", "9999-12-31T23:59:59Z"], ["0001-01-01T00:00:00Z", "1950-01-01T00:00:00Z"]]) {
+        const observation = structuredClone(base);
+        const certificate = observation.certificates[1];
+        Object.assign(certificate, { notBefore, notAfter });
+        certificate.derived = derivedOf(new Date(notBefore), new Date(notAfter), new Date(base.observation.at));
+        const [line] = chainLinesOf(present(observation, { verbose: false, colour: false }));
+        assert.match(validityPartOf(line), VALIDITY_PART, line);
+        assert.ok(line.includes(`  until ${notAfter}, `), line);
+        assert.equal(/e[+-]\d/.test(line), false, line);
+    }
+});
+
+test("the name on a chain line is shown escaped, as it is everywhere else, and the validity beside it is not changed by it", () => {
+    const observation = structuredClone(expected("bundle-ordered.pem"));
+    const certificate = observation.certificates[1];
+    certificate.subject = { cn: `evil${ESC}]0;pwned\u0007 a\u202Eb until 1999-01-01T00:00:00Z`, dn: "CN=evil" };
+    const [line] = chainLinesOf(present(observation, { verbose: false, colour: false }));
+    assert.equal(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e]/.test(line), false, line);
+    assert.ok(line.includes("evil\\u{1B}]0;pwned\\u{7} a\\u{202E}b until 1999-01-01T00:00:00Z  ("), line);
+    assert.ok(line.endsWith(`  until ${certificate.notAfter}, ${timeRemaining(certificate, observation.observation.at)}  ${certificate.sha256}`), line);
+});
+
+test("the real output of the chain is compared only with the time remaining taken out, because that text depends on the clock", async () => {
+    const cwd = new URL(root).pathname;
+    for (const name of ["bundle-ordered.pem", "bundle-duplicates.pem"]) {
+        for (const verbose of [false, true]) {
+            const real = await run(["inspect", ...(verbose ? ["--verbose"] : []), typed(name)], { cwd });
+            assert.equal(real.code, 0, real.stderr);
+            const want = present(expected(name), { verbose, colour: false });
+            assert.equal(withoutTimeRemaining(real.stdout), withoutTimeRemaining(want), `${name} ${verbose}`);
+            // One mark for every certificate: the target's line and each line of the chain.
+            assert.equal(withoutTimeRemaining(real.stdout).split("…").length - 1, expected(name).certificates.length, `${name} ${verbose}`);
+        }
+    }
+});
+
+test("--verbose, --json, --query and the exit codes behave as before: only the one-line summary of the chain changed", async () => {
+    const cwd = new URL(root).pathname;
+    const want = expected("bundle-ordered.pem");
+
+    // --verbose has a full block for every certificate and no summary line.
+    const text = present(want, { verbose: true, colour: false });
+    assert.equal(text.includes("until "), false);
+    assert.equal(chainLinesOf(text).length, 0);
+    for (const certificate of want.certificates) {
+        assert.equal(remainingOf(text, certificate.index), timeRemaining(certificate, want.observation.at), `[${certificate.index}]`);
+    }
+
+    // The real command: the document, the value and the silence do not contain the new text.
+    const json = await run(["inspect", "--json", typed("bundle-ordered.pem")], { cwd });
+    assert.equal(json.code, 0, json.stderr);
+    assert.equal(json.stdout, serializeObservation(JSON.parse(json.stdout)));
+    assert.equal(json.stdout.includes("until "), false);
+    const verbose = await run(["inspect", "--verbose", typed("bundle-ordered.pem")], { cwd });
+    assert.equal(verbose.code, 0, verbose.stderr);
+    assert.equal(verbose.stdout.includes("until "), false);
+    const query = await run(["inspect", "--query", "certificates[1].notAfter", typed("bundle-ordered.pem")], { cwd });
+    assert.deepEqual([query.code, query.stdout, query.stderr], [0, `${want.certificates[1].notAfter}\n`, ""]);
+    const quiet = await run(["inspect", "--quiet", typed("bundle-ordered.pem")], { cwd });
+    assert.deepEqual([quiet.code, quiet.stdout, quiet.stderr], [0, "", ""]);
+    const missing = await run(["inspect", "missing.pem"], { cwd });
+    assert.equal(missing.code, 3);
 });
 
 test("an extended key usage extension that is absent, and one that is present and empty, are told apart", () => {
@@ -426,14 +669,14 @@ test("NO_COLOR is respected, and it is the only condition that disables colour: 
     ];
     for (const [name, options] of same) {
         const result = await run(args, { cwd, ...options, env: { NO_COLOR: undefined, ...options.env } });
-        assert.equal(withoutRemaining(result.stdout), withoutRemaining(coloured.stdout), name);
+        assert.equal(withoutTimeRemaining(result.stdout), withoutTimeRemaining(coloured.stdout), name);
     }
 
     // NO_COLOR with any value turns it off, with or without a terminal, and it is the same text.
     for (const NO_COLOR of ["1", "0", "false", "anything"]) {
         for (const nodeArguments of [[], ["--import", TERMINAL]]) {
             const result = await run(args, { cwd, nodeArguments, env: { NO_COLOR } });
-            assert.equal(withoutRemaining(result.stdout), withoutRemaining(plain), `NO_COLOR=${NO_COLOR} ${nodeArguments.length ? "terminal" : "pipe"}`);
+            assert.equal(withoutTimeRemaining(result.stdout), withoutTimeRemaining(plain), `NO_COLOR=${NO_COLOR} ${nodeArguments.length ? "terminal" : "pipe"}`);
         }
     }
 

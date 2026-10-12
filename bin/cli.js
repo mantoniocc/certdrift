@@ -276,14 +276,15 @@ export function present(observation, { verbose, colour }) {
     /** @param {Parameters<typeof styleText>[0]} format @param {string} text */
     const paint = (format, text) => (colour ? styleText(format, text, { validateStream: false }) : text);
     const { certificates, target, warnings } = observation;
-    const lines = [paint("bold", "Target"), ...block(certificates[target], verbose)];
+    const { at } = observation.observation;
+    const lines = [paint("bold", "Target"), ...block(certificates[target], verbose, at)];
 
     const others = certificates.filter((certificate) => certificate.index !== target);
     if (others.length > 0) {
         lines.push("", paint("bold", "Chain"));
         for (const certificate of others) {
-            if (verbose) lines.push(...block(certificate, true), "");
-            else lines.push(`  [${certificate.index}] ${certificate.kind}  ${nameOf(certificate.subject)}  ${relation(certificate)}  ${certificate.sha256}`);
+            if (verbose) lines.push(...block(certificate, true, at), "");
+            else lines.push(`  [${certificate.index}] ${certificate.kind}  ${nameOf(certificate.subject)}  ${relation(certificate)}  until ${certificate.notAfter}, ${timeRemaining(certificate, at)}  ${certificate.sha256}`);
         }
         if (verbose) lines.pop();
     }
@@ -301,9 +302,10 @@ export function present(observation, { verbose, colour }) {
  * The lines about one certificate.
  * @param {Certificate} certificate
  * @param {boolean} verbose
+ * @param {string} at The observation's instant.
  */
-function block(certificate, verbose) {
-    const { derived, key, san } = certificate;
+function block(certificate, verbose, at) {
+    const { key, san } = certificate;
     /** @type {[string, string[]][]} */
     const fields = [["certificate", [`[${certificate.index}] ${certificate.kind}  ${nameOf(certificate.subject)}`]]];
     if (verbose) fields.push(["subject", [safe(certificate.subject.dn)]], ["serial", [certificate.serial]]);
@@ -315,7 +317,7 @@ function block(certificate, verbose) {
     fields.push(["eku", [usages(certificate.eku, verbose)]]);
 
     fields.push(["validity", [`${certificate.notBefore} to ${certificate.notAfter}`]]);
-    fields.push(["remaining", [`${days(derived.daysRemaining)}, ${fractionUsed(derived.lifetimeFraction)}`]]);
+    fields.push(["remaining", [timeRemaining(certificate, at)]]);
     fields.push(["key", [keyText(key)]]);
     fields.push(["issuer", [`${nameOf(certificate.issuer)}  ${relation(certificate)}`]]);
     if (verbose) fields.push(["issuer dn", [safe(certificate.issuer.dn)]]);
@@ -358,6 +360,21 @@ function usages(usages, verbose) {
     return usages
         .map((usage) => (verbose && Object.hasOwn(EXTENDED_KEY_USAGE_OIDS, usage) ? `${usage} (${EXTENDED_KEY_USAGE_OIDS[/** @type {keyof typeof EXTENDED_KEY_USAGE_OIDS} */ (usage)]})` : safe(usage)))
         .join(", ");
+}
+
+/**
+ * The text that says how much of a certificate's validity is left, for the target and for every
+ * line of the chain, so that its wording is the same wherever it appears.
+ *
+ * It takes the dates and the instant of the observation besides `derived`, although it reads
+ * only `derived` today. Whether a validity has ended can be told only from the dates against the
+ * instant: `daysRemaining` is rounded, so a certificate that expired an hour ago reads `0 days`,
+ * the same as one that expires in an hour.
+ * @param {Pick<Certificate, "notBefore" | "notAfter" | "derived">} validity
+ * @param {string} at The observation's instant.
+ */
+export function timeRemaining({ derived }, at) {
+    return `${days(derived.daysRemaining)}, ${fractionUsed(derived.lifetimeFraction)}`;
 }
 
 /** @param {number} value */
