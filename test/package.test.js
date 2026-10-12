@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import * as library from "../src/index.js";
+import * as tlsModule from "../src/tls/index.js";
 import { declarationOf, expectedContents, holdsPrivateKey } from "../scripts/package-contents.mjs";
 
 // What can be checked about packaging without packing anything. Packing and installing the
@@ -77,6 +78,11 @@ test("the entry point exports at runtime exactly inspect, serializeObservation, 
     // Types leave no runtime export, so declaring or moving one cannot change this list. It is
     // written out so that adding or removing a name is an edit someone makes on purpose.
     assert.deepEqual(Object.keys(library).sort(), ["AmbiguousTargetError", "EXTENDED_KEY_USAGE_OIDS", "ParseError", "inspect", "serializeObservation"]);
+});
+
+test("certdrift/tls exports at runtime exactly fetchChain, ConnectionError, HandshakeError and TimeoutError", () => {
+    // The target parser is internal: it is not named by `exports`, so it is not part of this list.
+    assert.deepEqual(Object.keys(tlsModule).sort(), ["ConnectionError", "HandshakeError", "TimeoutError", "fetchChain"]);
 });
 
 // ---------------------------------------------------------------------------------------------

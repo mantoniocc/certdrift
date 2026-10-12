@@ -17,6 +17,7 @@ import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:tls";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -189,9 +190,6 @@ after(() => {
     if (temporary) rmSync(temporary, { recursive: true, force: true });
 });
 
-/** Whether the tarball carries the TLS entry point, which decides what importing it must do. */
-const carriesTls = () => setup.installedFiles.includes("src/tls/index.js");
-
 /**
  * Runs a script file in the consumer directory with the Node.js that runs this suite.
  * @param {string} name
@@ -303,30 +301,41 @@ test("the installed executable reads a DER file and standard input", async () =>
     assert.deepEqual([stdin.code, stdin.stdout], [0, `${sha256}\n`], shown(stdin));
 });
 
-test("the TLS entry point fails with ERR_MODULE_NOT_FOUND while it does not exist, and imports once it does", async () => {
-    const result = await runInConsumer("tls.mjs", `
-        try {
-            await import("certdrift/tls");
-            console.log(JSON.stringify({ imported: true }));
-        } catch (error) {
-            console.log(JSON.stringify({ code: error.code, message: error.message }));
-        }
-    `);
-    assert.equal(result.code, 0, shown(result));
-    const outcome = JSON.parse(result.stdout);
-
-    // The entry stays declared either way: a removed export would be ERR_PACKAGE_PATH_NOT_EXPORTED,
-    // which says "this package has no such thing" and is not the same as "not written yet".
+test("certdrift/tls imports from the installed package with its declarations, and fetches a chain from a local server that inspect() reads", async () => {
     const installedManifest = JSON.parse(readFileSync(join(setup.installed, "package.json"), "utf8"));
     assert.ok("./tls" in installedManifest.exports);
+    assert.ok(setup.installedFiles.includes("src/tls/index.js"));
+    assert.ok(setup.installedFiles.includes("types/tls/index.d.ts"), "the TLS entry point has no declarations");
 
-    if (carriesTls()) {
-        assert.deepEqual(outcome, { imported: true });
-        assert.ok(setup.installedFiles.includes("types/tls/index.d.ts"), "the TLS entry point has no declarations");
-    } else {
-        assert.equal(outcome.code, "ERR_MODULE_NOT_FOUND", outcome.message);
-        assert.match(outcome.message, /node_modules[\\/]certdrift[\\/]src[\\/]tls[\\/]index\.js/);
-        assert.deepEqual(setup.installedFiles.filter((path) => path.startsWith("types/tls/")), []);
+    // A server of this process, on the loopback interface: the installed package is the client.
+    const chain = ["leaf-p256.pem", "intermediate.pem"].map((name) => readFileSync(new URL(`test/fixtures/${name}`, root)));
+    const server = createServer({ key: readFileSync(new URL("test/fixtures/leaf-p256.key", root)), cert: Buffer.concat(chain) }, (socket) => socket.on("error", () => {}));
+    server.on("tlsClientError", () => {});
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+    try {
+        const { port } = /** @type {import("node:net").AddressInfo} */ (server.address());
+        const result = await runInConsumer("tls.mjs", `
+            import * as library from "certdrift";
+            import * as tls from "certdrift/tls";
+            const chain = await tls.fetchChain("127.0.0.1:${port}");
+            const observation = library.inspect(chain.bytes, { at: new Date(${AT.getTime()}), source: chain.source });
+            console.log(JSON.stringify({
+                resolved: import.meta.resolve("certdrift/tls"),
+                exports: Object.keys(tls).sort(),
+                observation: JSON.parse(library.serializeObservation(observation)),
+            }));
+        `);
+        assert.equal(result.code, 0, shown(result));
+        const installed = JSON.parse(result.stdout);
+
+        assert.ok(installed.resolved.includes("/node_modules/certdrift/src/tls/index.js"), installed.resolved);
+        const working = await import("../src/tls/index.js");
+        assert.deepEqual(installed.exports, Object.keys(working).sort());
+        assert.deepEqual(errorsOf(installed.observation), []);
+        const reference = inspect(Buffer.concat(chain), { at: AT, source: { kind: "host", ref: `127.0.0.1:${port}`, servername: null } });
+        assert.deepEqual(installed.observation, JSON.parse(serializeObservation(reference)));
+    } finally {
+        await new Promise((resolve) => server.close(() => resolve(undefined)));
     }
 });
 
@@ -356,9 +365,7 @@ test("every entry point in exports and bin exists in the installed package", () 
             return !setup.installedFiles.some((path) => pattern.test(`./${path}`));
         })
         .sort();
-    // Until the TLS module is written, its two targets are the only ones allowed to be absent,
-    // and the test above this section is the one that says what importing them does.
-    assert.deepEqual(missing, carriesTls() ? [] : ["./src/tls/index.js", "./types/tls/index.d.ts"]);
+    assert.deepEqual(missing, []);
 });
 
 test("the command is declared as bin.certdrift, which npm pkg fix drops while the file is missing", () => {
@@ -552,6 +559,72 @@ test("a consumer that emits declarations names every type it infers from inspect
     for (const name of ["Observation", "CertificateObservation", "DistinguishedName", "SubjectAltNames", "Source", "Warning"]) {
         assert.match(declarations, new RegExp(`import\\("certdrift"\\)\\.${name}\\b`), `${name} is not named through certdrift`);
     }
+    assert.doesNotMatch(declarations, /certdrift\/types|certdrift\/src/, "the declarations point into the package's files");
+});
+
+// ---------------------------------------------------------------------------------------------
+// The types of the TLS entry point
+
+test("fetchChain, its options and its result import as types from certdrift/tls, and its source is the Source inspect() takes", async () => {
+    const result = await typeCheckInConsumer({
+        "tls.ts": `
+        import { fetchChain, ConnectionError, HandshakeError, TimeoutError } from "certdrift/tls";
+        import type { FetchChainOptions, FetchedChain } from "certdrift/tls";
+        import { inspect } from "certdrift";
+        import type { Observation, Source } from "certdrift";
+        ${TYPE_HELPERS}
+
+        export type Checks = [
+            Expect<Equal<Awaited<ReturnType<typeof fetchChain>>, FetchedChain>>,
+            Expect<Equal<Parameters<typeof fetchChain>, [target: string, options?: FetchChainOptions]>>,
+            // The source is the very type inspect() takes, not a copy of it.
+            Expect<Equal<FetchedChain["source"], Source>>,
+            Expect<Equal<FetchedChain["bytes"], Uint8Array>>,
+            Expect<Equal<keyof FetchedChain, "bytes" | "source">>,
+            Expect<Equal<keyof FetchChainOptions, "servername" | "timeoutMs" | "signal">>,
+            // None of them is \`any\`, which would be equal to a type that is \`any\` too.
+            Expect<Equal<Equal<FetchedChain, any>, false>>,
+            Expect<Equal<Equal<FetchChainOptions, any>, false>>,
+        ];
+
+        // What fetchChain returns is handed to inspect() as it is.
+        export async function observe(): Promise<Observation> {
+            const { bytes, source } = await fetchChain("example.test:8443", { servername: "example.test", timeoutMs: 5000, signal: AbortSignal.timeout(6000) });
+            return inspect(bytes, { source });
+        }
+
+        // The three errors are Errors that keep what failed underneath.
+        export const errors: Error[] = [new ConnectionError("x", { cause: new Error("y") }), new HandshakeError("x"), new TimeoutError("x")];
+
+        // Each of these fails as an unused directive if its type collapses to \`any\`.
+        // @ts-expect-error: the target is text
+        export const notTarget = fetchChain(443);
+        // @ts-expect-error: the timeout is a number
+        export const notOptions: FetchChainOptions = { timeoutMs: "10" };
+        // @ts-expect-error: the bytes are not text
+        export const notBytes: string = (await fetchChain("example.test")).bytes;
+    `,
+    });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+});
+
+test("a consumer that emits declarations names what it infers from fetchChain through certdrift/tls and certdrift", async () => {
+    // A type that is only an alias of one declared in another file cannot be written into the
+    // consumer's declarations (TS2883), and a consumer would have to annotate by hand.
+    const result = await typeCheckInConsumer({
+        "emit.ts": `
+        import { fetchChain } from "certdrift/tls";
+        export const attempt = () => fetchChain("example.test");
+        export const chain = await fetchChain("example.test");
+        export const source = chain.source;
+        export const bytes = chain.bytes;
+    `,
+    }, { noEmit: false, declaration: true, emitDeclarationOnly: true, outDir: "out" });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+
+    const declarations = readFileSync(join(result.directory, "out", "emit.d.ts"), "utf8");
+    assert.match(declarations, /import\("certdrift\/tls"\)\.FetchedChain\b/);
+    assert.match(declarations, /import\("certdrift"\)\.Source\b/);
     assert.doesNotMatch(declarations, /certdrift\/types|certdrift\/src/, "the declarations point into the package's files");
 });
 
