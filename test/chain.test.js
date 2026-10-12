@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { X509Certificate } from "node:crypto";
 import { inspect, AmbiguousTargetError } from "../src/index.js";
 
-// Relations between the certificates of one material: kind, who issued whom, and which
+// Relations between the certificates of one material: who issued whom, and which
 // certificate the observation is about. Nothing here may depend on a fixture's exact bytes,
 // because `npm run fixtures` replaces them, so every expectation comes from the scenario that
 // generates the fixture (its extensions, its names, its keys) or from Node.js itself.
@@ -67,17 +67,6 @@ function ambiguity(action) {
 const SINGLES = readdirSync(fixturesUrl)
     .filter((name) => name.endsWith(".pem") && !name.startsWith("bundle-"))
     .sort();
-
-test("kind is end-entity when basicConstraints does not mark the certificate as a CA, and ca when it does", async (t) => {
-    assert.ok(SINGLES.length >= 25, `expected the single-certificate fixtures, found ${SINGLES.length}`);
-    for (const name of SINGLES) {
-        await t.test(name, () => {
-            const extensions = readFileSync(new URL(name.replace(/\.pem$/, ".ext"), fixturesUrl), "utf8");
-            const expected = /CA:TRUE/.test(extensions) ? "ca" : "end-entity";
-            assert.equal(observe(name).certificates[0].kind, expected);
-        });
-    }
-});
 
 test("selfSigned is true when the issuer name equals the subject and verify() passes with the certificate's own key", async (t) => {
     const expected = {

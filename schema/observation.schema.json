@@ -82,7 +82,7 @@
           "minimum": 0
         },
         "kind": {
-          "description": "Derived from the certificate's own bytes, not its position. Known values: end-entity (basicConstraints does not mark it as a CA), ca. Tolerate unknown values.",
+          "description": "Derived from the certificate's own bytes, not its position. Known values: ca, when basicConstraints marks the certificate as a CA and, if a Key Usage extension is present, it includes keyCertSign, the bit that allows a key to sign certificates; end-entity for anything else, including a certificate marked as a CA whose Key Usage lacks keyCertSign. Tolerate unknown values.",
           "type": "string",
           "minLength": 1
         },
