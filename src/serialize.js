@@ -51,7 +51,7 @@ const observation = {
  * means something in them (the certificates are in input order, the warnings as they were found).
  * Text is written as UTF-8 characters, not escaped, except for what JSON requires to be escaped.
  *
- * @param {import("./inspect.js").Observation} value
+ * @param {import("./index.js").Observation} value
  * @returns {string}
  * @throws {TypeError} The argument is not an object, or it contains itself.
  */

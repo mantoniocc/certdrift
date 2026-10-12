@@ -6,13 +6,7 @@ import { ParseError } from "./errors.js";
 // scanner that follows the quotes instead of by splitting on `, `, so it does not depend on
 // Node.js escaping every comma.
 
-/**
- * @typedef {object} SubjectAltNames
- * @property {string[]} dns Lowercase, sorted.
- * @property {string[]} ip Canonical form, sorted.
- * @property {string[]} email Sorted.
- * @property {string[]} uri Sorted.
- */
+/** @import { SubjectAltNames } from "./index.js" */
 
 /**
  * Entries of a type the observation has no list for, as Node.js names the type.

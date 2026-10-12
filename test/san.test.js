@@ -197,7 +197,7 @@ test("canonical IPv6 is compressed and lowercase without any dependency: ::, lea
 });
 
 test("a type the contract does not represent gives one SAN_TYPE_UNREPRESENTED warning per certificate and type, pointing at that certificate: leaf-san-kinds.pem", async (t) => {
-    /** @param {import("../src/inspect.js").Observation} observation */
+    /** @param {import("../src/index.js").Observation} observation */
     const sanWarnings = (observation) => observation.warnings.filter((warning) => warning.code === "SAN_TYPE_UNREPRESENTED");
 
     await t.test("leaf-san-kinds.pem: its DirName and its otherName each give one, and the names it can represent are all there", () => {
