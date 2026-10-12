@@ -404,19 +404,23 @@ test("the schemas, README.md and LICENSE are installed byte for byte, and every 
     assert.deepEqual(JSON.parse(result.stdout), schemas.map((path) => JSON.parse(readFileSync(new URL(path, root), "utf8"))));
 });
 
-test("the generated type declarations type-check a TypeScript consumer", async () => {
-    writeFileSync(join(setup.consumer, "consumer.ts"), `
-        import { inspect, serializeObservation, ParseError } from "certdrift";
+const TSC = fileURLToPath(new URL("node_modules/typescript/bin/tsc", root));
+let typeChecks = 0;
 
-        const observation = inspect(new Uint8Array(), { at: new Date(0) });
-        export const contract: 1 = observation.contract;
-        // Fails as an unused directive if the declarations collapse to \`any\`, which type-checks everything.
-        // @ts-expect-error: the contract number is a literal, not a string
-        export const wrong: string = observation.contract;
-        export const text: string = serializeObservation(observation);
-        export const error: Error = new ParseError("x", 1);
-    `);
-    writeFileSync(join(setup.consumer, "tsconfig.json"), JSON.stringify({
+/**
+ * Compiles TypeScript or JavaScript files in a directory of the consumer, with the repository's
+ * own TypeScript, against the installed tarball: the package resolves from `node_modules`, as it
+ * does for anyone who installs it. Each call gets its own directory, so a file one check wrote
+ * cannot hide a missing import in the next.
+ * @param {Record<string, string>} files File name to text.
+ * @param {Record<string, unknown>} [compilerOptions] Added to the strict `nodenext` defaults.
+ * @returns {Promise<Result & { directory: string }>}
+ */
+async function typeCheckInConsumer(files, compilerOptions = {}) {
+    const directory = join(setup.consumer, `types-${typeChecks++}`);
+    mkdirSync(directory);
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(directory, name), text);
+    writeFileSync(join(directory, "tsconfig.json"), JSON.stringify({
         compilerOptions: {
             module: "nodenext",
             moduleResolution: "nodenext",
@@ -426,10 +430,202 @@ test("the generated type declarations type-check a TypeScript consumer", async (
             // The consumer of a Node.js library has Node.js types; the repository's stand in for them.
             types: ["node"],
             typeRoots: [fileURLToPath(new URL("node_modules/@types", root))],
+            ...compilerOptions,
         },
-        files: ["consumer.ts"],
+        files: Object.keys(files),
     }));
-    const tsc = fileURLToPath(new URL("node_modules/typescript/bin/tsc", root));
-    const result = await run(process.execPath, [tsc, "-p", "tsconfig.json"], setup.consumer);
+    return { ...(await run(process.execPath, [TSC, "-p", "tsconfig.json"], directory)), directory };
+}
+
+test("the generated type declarations type-check a TypeScript consumer", async () => {
+    const result = await typeCheckInConsumer({
+        "consumer.ts": `
+        import { inspect, serializeObservation, ParseError } from "certdrift";
+
+        const observation = inspect(new Uint8Array(), { at: new Date(0) });
+        export const contract: 1 = observation.contract;
+        // Fails as an unused directive if the declarations collapse to \`any\`, which type-checks everything.
+        // @ts-expect-error: the contract number is a literal, not a string
+        export const wrong: string = observation.contract;
+        export const text: string = serializeObservation(observation);
+        export const error: Error = new ParseError("x", 1);
+    `,
+    });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+});
+
+// ---------------------------------------------------------------------------------------------
+// The types of the entry point
+
+/** Exact type equality, which assignability alone cannot give: `any` is assignable both ways. */
+const TYPE_HELPERS = `
+    type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
+    type Expect<T extends true> = T;
+`;
+
+test("Observation, CertificateObservation, Source and Warning import as types from the installed package", async () => {
+    const result = await typeCheckInConsumer({
+        "named.ts": `
+        import type { Observation, CertificateObservation, Source, Warning } from "certdrift";
+        import { inspect } from "certdrift";
+
+        export const source: Source = { kind: "file", ref: "leaf-p256.pem" };
+        export const observation: Observation = inspect(new Uint8Array(), { source });
+        export const certificate: CertificateObservation = observation.certificates[0];
+        export const warning: Warning = observation.warnings[0];
+
+        // Each of these fails as an unused directive if its type collapses to \`any\`.
+        // @ts-expect-error: the contract number is 1
+        export const notObservation: Observation = { contract: 2 };
+        // @ts-expect-error: a certificate has fields
+        export const notCertificate: CertificateObservation = {};
+        // @ts-expect-error: a source is an object
+        export const notSource: Source = 42;
+        // @ts-expect-error: a warning code is text
+        export const notWarning: Warning = { code: 1, certificate: null, message: "" };
+    `,
+    });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+});
+
+test("the TypeScript check fails with TS2305 when a type it imports is not exported", async () => {
+    // The detector for the test above: a name the package does not export must fail the compile,
+    // so a type dropped from the entry point cannot pass unseen.
+    const result = await typeCheckInConsumer({
+        "missing.ts": `import type { Observation, NoSuchType } from "certdrift";\nexport type Both = [Observation, NoSuchType];\n`,
+    });
+    assert.notEqual(result.code, 0, shown(result));
+    assert.match(result.stdout, /TS2305.*'NoSuchType'/, shown(result));
+});
+
+test("a value inspect() returns is an Observation, its source option takes a Source, and CertificateObservation and Warning are the observation's own entries", async () => {
+    const result = await typeCheckInConsumer({
+        "equal.ts": `
+        import type { Observation, CertificateObservation, Source, Warning } from "certdrift";
+        import { inspect, serializeObservation } from "certdrift";
+        ${TYPE_HELPERS}
+        type Options = NonNullable<Parameters<typeof inspect>[1]>;
+
+        export type Checks = [
+            Expect<Equal<Observation, ReturnType<typeof inspect>>>,
+            Expect<Equal<Observation, Parameters<typeof serializeObservation>[0]>>,
+            Expect<Equal<Source, NonNullable<Options["source"]>>>,
+            Expect<Equal<Source, Observation["observation"]["source"]>>,
+            Expect<Equal<CertificateObservation, Observation["certificates"][number]>>,
+            Expect<Equal<Warning, Observation["warnings"][number]>>,
+            // None of the four is \`any\`, which would be equal to a type that is \`any\` too.
+            Expect<Equal<Equal<Observation, any>, false>>,
+            Expect<Equal<Equal<CertificateObservation, any>, false>>,
+            Expect<Equal<Equal<Source, any>, false>>,
+            Expect<Equal<Equal<Warning, any>, false>>,
+        ];
+
+        // A Source made apart from the call is accepted by it as it is, and the result is an Observation.
+        const source: Source = { kind: "host", ref: "example.test:443", servername: null };
+        export const observation: Observation = inspect(new Uint8Array(), { source });
+    `,
+    });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+});
+
+test("a consumer that emits declarations names every type it infers from inspect() through certdrift, nested shapes included", async () => {
+    // A type that is only an alias of one declared in another file cannot be written into the
+    // consumer's declarations (TS2883), and a consumer that exports a value inferred from
+    // inspect() would have to annotate it by hand.
+    const result = await typeCheckInConsumer({
+        "emit.ts": `
+        import { inspect } from "certdrift";
+        const observation = inspect(new Uint8Array());
+        export const whole = observation;
+        export const certificate = observation.certificates[0];
+        export const subject = observation.certificates[0].subject;
+        export const san = observation.certificates[0].san;
+        export const key = observation.certificates[0].key;
+        export const derived = observation.certificates[0].derived;
+        export const source = observation.observation.source;
+        export const warnings = observation.warnings;
+    `,
+    }, { noEmit: false, declaration: true, emitDeclarationOnly: true, outDir: "out" });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+
+    const declarations = readFileSync(join(result.directory, "out", "emit.d.ts"), "utf8");
+    for (const name of ["Observation", "CertificateObservation", "DistinguishedName", "SubjectAltNames", "Source", "Warning"]) {
+        assert.match(declarations, new RegExp(`import\\("certdrift"\\)\\.${name}\\b`), `${name} is not named through certdrift`);
+    }
+    assert.doesNotMatch(declarations, /certdrift\/types|certdrift\/src/, "the declarations point into the package's files");
+});
+
+test("the types import from JavaScript through JSDoc and under the strictest compiler options", async () => {
+    const javascript = await typeCheckInConsumer({
+        "typed.js": `
+        /** @import { Observation, Source } from "certdrift" */
+        import { inspect } from "certdrift";
+
+        /** @type {Source} */
+        const source = { kind: "file", ref: "leaf-p256.pem" };
+        /** @type {Observation} */
+        export const observation = inspect(new Uint8Array(), { source });
+        // Fails as an unused directive if the type is not checked at all.
+        /** @type {Observation} */
+        // @ts-expect-error: the contract number is 1
+        export const wrong = { contract: 2 };
+    `,
+    }, { allowJs: true, checkJs: true });
+    assert.deepEqual([javascript.code, javascript.stdout], [0, ""], shown(javascript));
+
+    const strictest = await typeCheckInConsumer({
+        "strictest.ts": `
+        import { inspect, type Observation, type CertificateObservation, type Source, type Warning } from "certdrift";
+
+        const source: Source = { kind: "host", ref: "example.test:443", servername: "example.test" };
+        export const observation: Observation = inspect(new Uint8Array(), { source });
+        export const certificate: CertificateObservation | undefined = observation.certificates[0];
+        export const warning: Warning | undefined = observation.warnings[0];
+    `,
+    }, { exactOptionalPropertyTypes: true, noUncheckedIndexedAccess: true, noPropertyAccessFromIndexSignature: true, verbatimModuleSyntax: true, isolatedModules: true, skipLibCheck: false });
+    assert.deepEqual([strictest.code, strictest.stdout], [0, ""], shown(strictest));
+});
+
+test("each exported type has the schema's property names and required ones, and accepts any string where the schema leaves a value open", async () => {
+    const schema = JSON.parse(readFileSync(join(setup.installed, "schema", "observation.schema.json"), "utf8"));
+    /** @type {[string, { properties: Record<string, unknown>, required: string[] }][]} */
+    const table = [
+        ["Observation", schema],
+        ['Observation["observation"]', schema.properties.observation],
+        ["Source", schema.$defs.source],
+        ["CertificateObservation", schema.$defs.certificate],
+        ["DistinguishedName", schema.$defs.name],
+        ["SubjectAltNames", schema.$defs.san],
+        ['CertificateObservation["key"]', schema.$defs.key],
+        ['CertificateObservation["derived"]', schema.$defs.derived],
+        ["Warning", schema.$defs.warning],
+    ];
+    /** @param {string[]} names */
+    const union = (names) => (names.length === 0 ? "never" : names.map((name) => JSON.stringify(name)).join(" | "));
+    const checks = table.flatMap(([type, node]) => [
+        `Expect<Equal<keyof ${type}, ${union(Object.keys(node.properties))}>>`,
+        `Expect<Equal<RequiredKeys<${type}>, ${union(node.required)}>>`,
+    ]);
+
+    const result = await typeCheckInConsumer({
+        "schema.ts": `
+        import type { Observation, CertificateObservation, Source, Warning, DistinguishedName, SubjectAltNames } from "certdrift";
+        ${TYPE_HELPERS}
+        type RequiredKeys<T> = { [K in keyof T]-?: {} extends Pick<T, K> ? never : K }[keyof T];
+
+        export type Checks = [
+            ${checks.join(",\n            ")},
+        ];
+
+        // The schema says to tolerate unknown values in these, so a value this version has never
+        // produced has to be assignable. A union of today's values would reject it.
+        declare const anything: string;
+        export const sourceKind: Source["kind"] = anything;
+        export const certificateKind: CertificateObservation["kind"] = anything;
+        export const warningCode: Warning["code"] = anything;
+        export const keyAlgorithm: CertificateObservation["key"]["algorithm"] = anything;
+        export type Unused = [Observation, DistinguishedName, SubjectAltNames];
+    `,
+    });
     assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
 });

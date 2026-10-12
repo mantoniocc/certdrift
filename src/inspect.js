@@ -9,57 +9,7 @@ import { publicKeyOf } from "./key.js";
 import { derivedOf } from "./derived.js";
 import { validityDate } from "./dates.js";
 
-/**
- * Where the material came from. The CLI and the TLS layer fill `ref` and `servername`.
- * @typedef {object} Source
- * @property {string} kind
- * @property {string} [ref]
- * @property {string | null} [servername]
- * @property {string} [provider]
- */
-
-/**
- * @typedef {object} DistinguishedName
- * @property {string | null} cn
- * @property {string} dn
- */
-
-/**
- * @typedef {object} CertificateObservation
- * @property {number} index
- * @property {string} kind
- * @property {boolean} selfSigned
- * @property {number[]} issuedBy
- * @property {DistinguishedName} subject
- * @property {DistinguishedName} issuer
- * @property {string} serial
- * @property {string} notBefore
- * @property {string} notAfter
- * @property {import("./san.js").SubjectAltNames} san
- * @property {string[] | null} eku
- * @property {{ algorithm: string | null, size: number | null, curve: string | null }} key
- * @property {string} sha256
- * @property {string} spkiSha256
- * @property {{ daysRemaining: number, lifetimeFraction: number | null }} derived
- */
-
-/**
- * @typedef {object} Warning
- * @property {string} code
- * @property {number | null} certificate
- * @property {string} message
- */
-
-/**
- * The observation of some certificate material, as described by `schema/observation.schema.json`.
- * @typedef {object} Observation
- * @property {1} contract
- * @property {"x509"} format
- * @property {{ at: string, source: Source }} observation
- * @property {number} target
- * @property {CertificateObservation[]} certificates
- * @property {Warning[]} warnings
- */
+/** @import { CertificateObservation, Observation, Source, SubjectAltNames } from "./index.js" */
 
 /**
  * Turns certificate material into an observation. Reads no files and opens no sockets.
@@ -120,7 +70,7 @@ export function inspect(material, options) {
  * @param {import("./material.js").CertificateRead} read
  * @param {number} index
  * @param {number[]} issuedBy
- * @param {import("./san.js").SubjectAltNames} san
+ * @param {SubjectAltNames} san
  * @param {Date} at
  * @returns {CertificateObservation}
  * @throws {import("./errors.js").ParseError} A validity date that is not a real instant.

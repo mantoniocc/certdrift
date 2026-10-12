@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
+import * as library from "../src/index.js";
 import { declarationOf, expectedContents, holdsPrivateKey } from "../scripts/package-contents.mjs";
 
 // What can be checked about packaging without packing anything. Packing and installing the
@@ -67,6 +68,15 @@ test("npm run check never reaches package:check, through another script or a pre
         assert.doesNotMatch(manifest.scripts[name], /package[:-]check/, `${name} runs the package check`);
     }
     assert.equal("precheck" in manifest.scripts || "postcheck" in manifest.scripts, false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// What the entry point exports
+
+test("the entry point exports at runtime exactly inspect, serializeObservation, ParseError, AmbiguousTargetError and EXTENDED_KEY_USAGE_OIDS", () => {
+    // Types leave no runtime export, so declaring or moving one cannot change this list. It is
+    // written out so that adding or removing a name is an edit someone makes on purpose.
+    assert.deepEqual(Object.keys(library).sort(), ["AmbiguousTargetError", "EXTENDED_KEY_USAGE_OIDS", "ParseError", "inspect", "serializeObservation"]);
 });
 
 // ---------------------------------------------------------------------------------------------

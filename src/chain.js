@@ -17,7 +17,7 @@ import { commonName } from "./names.js";
  *   whose subject equals its issuer and whose public key verifies its signature. A
  *   self-signed member includes itself.
  * @property {number} target The one member that signs no other member.
- * @property {import("./inspect.js").Warning[]} warnings One per duplicate dropped.
+ * @property {import("./index.js").Warning[]} warnings One per duplicate dropped.
  * @throws {AmbiguousTargetError}
  */
 
@@ -43,7 +43,7 @@ function withoutDuplicates(reads) {
     const members = [];
     /** @type {Map<string, number>} */
     const positions = new Map();
-    /** @type {import("./inspect.js").Warning[]} */
+    /** @type {import("./index.js").Warning[]} */
     const warnings = [];
 
     for (const read of reads) {
