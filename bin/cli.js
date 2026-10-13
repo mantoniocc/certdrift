@@ -7,7 +7,10 @@ import {
     AmbiguousTargetError,
     EXTENDED_KEY_USAGE_OIDS,
 } from "../src/index.js";
+import { ConnectionError, HandshakeError, TimeoutError, fetchChain } from "../src/tls/index.js";
 import { PathSyntaxError, labelOf, parsePath, printable, undeclaredAt, valueAt } from "./query.js";
+
+/** @import { Source } from "../src/index.js" */
 
 // The command orchestrates and presents. Everything that interprets a certificate is in the
 // library, and every value shown here comes from the observation or from its exports, so what
@@ -22,6 +25,10 @@ export const INSPECT_OPTIONS = /** @type {const} */ ({
     select: { type: "string", multiple: true },
     // A list for the same reason as `select`.
     query: { type: "string", multiple: true },
+    // The three below are lists for the same reason as `select`.
+    host: { type: "string", multiple: true },
+    servername: { type: "string", multiple: true },
+    timeout: { type: "string", multiple: true },
     help: { type: "boolean", short: "h" },
 });
 
@@ -32,7 +39,8 @@ export const INSPECT_OPTIONS = /** @type {const} */ ({
  */
 const OBSERVATION_SCHEMA = { name: "observation", url: new URL("../schema/observation.schema.json", import.meta.url) };
 
-const USAGE = "Usage: certdrift inspect [--json | --verbose | --quiet | --query <path>] [--select <sha256>] <path | ->";
+const USAGE = `Usage: certdrift inspect [--json | --verbose | --quiet | --query <path>] [--select <sha256>] <path | ->
+       certdrift inspect [same options] [--servername <name>] [--timeout <ms>] --host <host[:port]>`;
 
 // PENDING: name `certdrift check` once that command exists
 // The help says "the checking command" until then, because naming a command that can not be run
@@ -43,17 +51,40 @@ const HELP = `certdrift inspects X.509 certificates.
 ${USAGE}
 
 Reads one certificate or a bundle, as PEM or DER, from a file, or from standard input when the
-path is "-". Prints the certificate the material is about, with the rest of its chain.
+path is "-". With --host it reads the certificates a server sends instead. Prints the certificate
+the material is about, with the rest of its chain.
 
 Options:
-  --json             Print the observation as JSON and nothing else on standard output.
-  -v, --verbose      Add the full names, the serial, the public key fingerprint, the OIDs
-                     beside the usage names and the detail of every certificate in the chain.
-  -q, --quiet        Print nothing. The exit code still says what happened.
-  --query <path>     Print one value of the observation, not the whole of it. See below.
-  --select <sha256>  Choose the certificate when a bundle has several that could be the one it
-                     is about. A prefix of its sha256 is enough if it is unique.
-  -h, --help         Print this text.
+  --json                Print the observation as JSON and nothing else on standard output.
+  -v, --verbose         Add the full names, the serial, the public key fingerprint, the OIDs
+                        beside the usage names and the detail of every certificate in the chain.
+  -q, --quiet           Print nothing. The exit code still says what happened.
+  --query <path>        Print one value of the observation, not the whole of it. See below.
+  --select <sha256>     Choose the certificate when a bundle has several that could be the one it
+                        is about. A prefix of its sha256 is enough if it is unique.
+  --host <host[:port]>  Inspect the certificates a server sends, not a file. See below.
+  --servername <name>   The server name to send in the handshake. Only with --host.
+  --timeout <ms>        The longest to wait for the host, in milliseconds. Only with --host.
+  -h, --help            Print this text.
+
+Inspecting a server:
+  --host connects over TLS and prints what the server sends as it prints a file. The host is
+  a name or an address, with the port after a colon (443 unless given). An IPv6 address is
+  written in brackets, and the argument quoted because a shell reads brackets as a pattern:
+
+    certdrift inspect --host api.example.com:443
+    certdrift inspect --host '[2001:db8::1]:443' --servername api.example.com
+
+  The host is always given with --host. A path is always a file, whatever it looks like, so
+  --host takes no path and no "-", and does not read standard input.
+
+  The certificates are exactly the ones the server sent, in the order it sent them. Nothing is
+  added from this machine's trust store, and nothing says whether this machine would trust them.
+
+  --servername is the name sent in the handshake, which decides the certificate a server picks.
+  It is the host name unless given, and an IP address sends none unless it is given.
+  --timeout is the longest the whole attempt may take, as a positive whole number of
+  milliseconds. It is 10000 unless given.
 
 Extracting a value:
   To extract a value, use --query. To make a decision, use the checking command: --query only
@@ -83,7 +114,8 @@ Exit codes:
   0  Success.
   2  Misuse, a --query path the schema does not declare, or a bundle whose certificate is
      ambiguous (the candidates are listed).
-  3  The file is missing or unreadable, or the material is not a certificate.
+  3  The file is missing or unreadable, the material is not a certificate, or the host cannot be
+     reached, refuses the connection, does not speak TLS or does not answer in time.
 `;
 
 /**
@@ -146,8 +178,24 @@ export async function main(argv, { env, stdin, stdout, stderr }) {
         out(HELP);
         return 0;
     }
-    if (positionals.length === 0) return misuse('no path given; use "-" to read standard input');
-    if (positionals.length > 1) return misuse(`expected one path, got ${positionals.length}`);
+    for (const name of /** @type {const} */ (["host", "servername", "timeout"])) {
+        if ((values[name]?.length ?? 0) > 1) return misuse(`--${name} was given more than once`);
+    }
+    const host = values.host?.[0];
+    const servername = values.servername?.[0];
+    const timeout = values.timeout?.[0];
+    if (host !== undefined) {
+        // A path is always a file and the host is always given with --host, so a command line that
+        // holds both has no single meaning, and neither is guessed from a colon or from whether a
+        // file of that name exists.
+        if (positionals.length > 0) return misuse('--host takes no path and no "-": it reads what a server sends, not a file or standard input');
+        if (timeout !== undefined && !/^[1-9][0-9]*$/.test(timeout)) return misuse(`--timeout needs a positive whole number of milliseconds, and got ${JSON.stringify(timeout)}`);
+    } else {
+        if (servername !== undefined) return misuse("--servername is sent to a host, so it needs --host");
+        if (timeout !== undefined) return misuse("--timeout is the wait for a host, so it needs --host");
+        if (positionals.length === 0) return misuse('no path given; use "-" to read standard input, or --host to inspect a server');
+        if (positionals.length > 1) return misuse(`expected one path, got ${positionals.length}`);
+    }
     if (values.select !== undefined && values.select.length > 1) return misuse("--select was given more than once");
     const select = values.select?.[0];
     if (select === "") return misuse("--select needs the start of a sha256, and it is empty");
@@ -175,20 +223,52 @@ export async function main(argv, { env, stdin, stdout, stderr }) {
         if (unknown !== -1) return misuse(`unknown field in ${labelOf(OBSERVATION_SCHEMA.name, schema)}: ${steps[unknown].through}`);
     }
 
-    const [path] = positionals;
-    const source = path === "-" ? { kind: "stdin", ref: "-" } : { kind: "file", ref: path };
-    const described = path === "-" ? "standard input" : path;
-
     /** @type {Uint8Array} */
     let material;
-    try {
-        material = path === "-" ? await readAll(stdin) : await readFile(path);
-    } catch (error) {
-        if (error instanceof Error && "code" in error) {
-            err(`certdrift: cannot read ${safe(described)}: ${safe(error.message)}\n`);
+    /** @type {Source} */
+    let source;
+    /** What the messages call the material. */
+    let described;
+    if (host !== undefined) {
+        const options = {
+            ...(servername === undefined ? {} : { servername }),
+            ...(timeout === undefined ? {} : { timeoutMs: Number(timeout) }),
+        };
+
+        // `fetchChain` refuses an argument it cannot use with a `TypeError` before it opens a socket,
+        // and it does so before it looks at the signal. Asking with a signal that is already aborted
+        // therefore tells a refused argument (misuse) from everything else without connecting,
+        // and without taking every `TypeError` for misuse: the one raised while connecting is a bug.
+        const accepted = new Error("the arguments were accepted");
+        try {
+            await fetchChain(host, { ...options, signal: AbortSignal.abort(accepted) });
+        } catch (error) {
+            if (error instanceof TypeError) return misuse(error.message);
+            if (error !== accepted) throw error;
+        }
+
+        try {
+            ({ bytes: material, source } = await fetchChain(host, options));
+        } catch (error) {
+            const failure = hostFailure(error);
+            if (failure === undefined) throw error;
+            err(`certdrift: ${safe(host)}: ${failure}\n`);
             return 3;
         }
-        throw error;
+        described = source.ref ?? host;
+    } else {
+        const [path] = positionals;
+        source = path === "-" ? { kind: "stdin", ref: "-" } : { kind: "file", ref: path };
+        described = path === "-" ? "standard input" : path;
+        try {
+            material = path === "-" ? await readAll(stdin) : await readFile(path);
+        } catch (error) {
+            if (error instanceof Error && "code" in error) {
+                err(`certdrift: cannot read ${safe(described)}: ${safe(error.message)}\n`);
+                return 3;
+            }
+            throw error;
+        }
     }
 
     let observation;
@@ -259,6 +339,41 @@ function safe(text) {
  */
 function perLine(text) {
     return text.split("\n").map(safe).join("\n");
+}
+
+/**
+ * What a failure to get the certificates of a host says, or `undefined` when the error is none of
+ * the three the module raises for that: any other error is not this command's to explain.
+ *
+ * The module's `ConnectionError` covers a host that cannot be reached and one that refuses the
+ * connection, which a person fixes differently, so the original error's code tells them apart.
+ * Every part of the text comes from the error, and the host's own text can be in it, so it is shown
+ * escaped.
+ * @param {unknown} error
+ * @returns {string | undefined}
+ */
+export function hostFailure(error) {
+    if (error instanceof TimeoutError) return `did not answer in time: ${safe(error.message)}`;
+    if (error instanceof HandshakeError) return `the TLS handshake failed (the host may not speak TLS): ${safe(reasonOf(error))}`;
+    if (error instanceof ConnectionError) {
+        const code = error.cause instanceof Error && "code" in error.cause ? error.cause.code : undefined;
+        const refused = code === "ECONNREFUSED" || code === "ECONNRESET";
+        return `${refused ? "connection refused" : "cannot be reached"}: ${safe(reasonOf(error))}`;
+    }
+    return undefined;
+}
+
+/**
+ * The reason inside a module error: what Node.js or OpenSSL said, which is more to the point than
+ * the module's sentence around it, and that sentence when there is nothing underneath. OpenSSL's
+ * `reason` is the part of its report a reader needs.
+ * @param {Error} error
+ */
+function reasonOf(error) {
+    const { cause } = error;
+    if (!(cause instanceof Error)) return error.message;
+    const reason = /** @type {{ reason?: unknown }} */ (cause).reason;
+    return typeof reason === "string" ? reason : cause.message.split("\n")[0];
 }
 
 /**

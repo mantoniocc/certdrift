@@ -5,10 +5,13 @@ import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, r
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rootCertificates } from "node:tls";
+import { setTimeout as sleep } from "node:timers/promises";
 import { inspect, serializeObservation, AmbiguousTargetError } from "../src/index.js";
 import { derivedOf } from "../src/derived.js";
-import { INSPECT_OPTIONS, present, timeRemaining } from "../bin/cli.js";
+import { ConnectionError, HandshakeError, TimeoutError, fetchChain } from "../src/tls/index.js";
+import { INSPECT_OPTIONS, hostFailure, present, timeRemaining } from "../bin/cli.js";
 import { validatorFor } from "./helpers/schema.js";
+import { closedPort, serveChain, serveSilent, serveWith } from "./helpers/tls.js";
 
 // The command is run as a child process, the way a person runs it, so that the shebang, the
 // permission bit, the real streams and the exit code are all part of what is tested. The command
@@ -847,6 +850,9 @@ test("a message about a file names it, and the usage message names the flags tha
 // ---------------------------------------------------------------------------------------------
 // The source of the observation
 
+/** The flags that only mean something with a host. */
+const HOST_FLAGS = ["host", "servername", "timeout"];
+
 const FLAG_ARGUMENTS = {
     json: ["--json"],
     verbose: ["--json", "--verbose"],
@@ -857,8 +863,9 @@ const FLAG_ARGUMENTS = {
 };
 
 test("no flag writes into the observation's source", async () => {
-    // A flag added to the command must be added here, shown not to touch the source.
-    assert.deepEqual(Object.keys(INSPECT_OPTIONS).sort(), Object.keys(FLAG_ARGUMENTS).sort());
+    // A flag added to the command must be added here, shown not to touch the source. The flags
+    // that choose a host need a server to run against, and are shown in the test after this one.
+    assert.deepEqual(Object.keys(INSPECT_OPTIONS).sort(), [...Object.keys(FLAG_ARGUMENTS), ...HOST_FLAGS].sort());
 
     const cwd = new URL(root).pathname;
     for (const [flag, flags] of Object.entries(FLAG_ARGUMENTS)) {
@@ -1468,4 +1475,546 @@ test("--query on cases beyond the fixtures a script meets: a DER file, warnings,
         const result = await run(["inspect", ...args, typed("leaf-p256.pem")], { cwd: CWD });
         assert.deepEqual([args.join(" "), result.code, result.stdout], [args.join(" "), 2, ""]);
     }
+});
+
+// ---------------------------------------------------------------------------------------------
+// --host
+
+/** The bundle most tests serve: a leaf, its intermediate and the root. */
+const SERVED = ["leaf-p256.pem", "intermediate.pem", "root-ca.pem"];
+
+/** @param {{ port: number }} server */
+const hostOf = (server) => `127.0.0.1:${server.port}`;
+
+/** The PEM of some fixtures, in the order given. @param {string[]} names */
+const pemOf = (names) => Buffer.concat(names.map(fixture));
+
+/**
+ * A directory that is removed when the test ends.
+ * @param {import("node:test").TestContext} t
+ */
+function scratch(t) {
+    const dir = mkdtempSync(join(tmpdir(), "certdrift-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    return dir;
+}
+
+/** Characters that move a cursor, retitle a window or reverse a line. */
+const UNSAFE = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/;
+
+test("inspect --host fetches the chain from a local server and prints the same readable output as for a file holding the same certificates", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    const dir = scratch(t);
+    writeFileSync(join(dir, "served.pem"), pemOf(SERVED));
+
+    const viaHost = await run(["inspect", "--host", hostOf(server)]);
+    const viaFile = await run(["inspect", join(dir, "served.pem")]);
+    assert.equal(viaHost.code, 0, viaHost.stderr);
+    assert.equal(viaHost.stderr, "", "no warning, such as one about a server name that is an IP address");
+    assert.equal(withoutTimeRemaining(viaHost.stdout), withoutTimeRemaining(viaFile.stdout));
+
+    // The text is the one present() writes for what the server sent, with one mark for each certificate.
+    const sent = inspect(pemOf(SERVED), { at: AT, source: { kind: "host", ref: hostOf(server), servername: null } });
+    assert.equal(withoutTimeRemaining(viaHost.stdout), withoutTimeRemaining(present(sent, { verbose: false, colour: false })));
+    assert.equal(withoutTimeRemaining(viaHost.stdout).split("…").length - 1, SERVED.length);
+    assert.match(viaHost.stdout, /^Target\n/);
+});
+
+/** Sends what a connection to port 443 would carry to the port in `CERTDRIFT_TEST_PORT`, so the default port can be shown without 443. */
+const REDIRECT_443 = `data:text/javascript,${encodeURIComponent(`
+import tls from "node:tls";
+const connect = tls.connect;
+tls.connect = (options, ...rest) => connect.call(tls, { ...options, port: options.port === 443 ? Number(process.env.CERTDRIFT_TEST_PORT) : options.port }, ...rest);
+`)}`;
+
+test("--host defaults the port to 443 and takes an IPv6 address in brackets", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    const env = { CERTDRIFT_TEST_PORT: String(server.port) };
+
+    // Without a port the connection goes to 443, which the preload sends to the local server: with
+    // any other port it would not arrive, and the recorded label says 443 as well.
+    const defaulted = observationOf(await run(["inspect", "--json", "--host", "127.0.0.1"], { nodeArguments: ["--import", REDIRECT_443], env }));
+    assert.deepEqual(defaulted.observation.source, { kind: "host", ref: "127.0.0.1:443", servername: null });
+    const unredirected = await run(["inspect", "--json", "--host", `127.0.0.1:${server.port}`], { nodeArguments: ["--import", REDIRECT_443], env });
+    assert.equal(observationOf(unredirected).observation.source.ref, `127.0.0.1:${server.port}`);
+
+    // An IPv6 address is written in brackets, and an address without them is not guessed at.
+    const bare = await run(["inspect", "--host", "::1"]);
+    assert.equal(bare.code, 2);
+    assert.match(bare.stderr, /in brackets/);
+
+    let v6;
+    try {
+        v6 = await serveChain(t, { certs: SERVED, host: "::1" });
+    } catch (error) {
+        return t.skip(`::1 cannot be bound here: ${/** @type {NodeJS.ErrnoException} */ (error).code}`);
+    }
+    // Another spelling of the same address gets the same label.
+    for (const typedHost of [`[::1]:${v6.port}`, `[0:0:0:0:0:0:0:1]:${v6.port}`]) {
+        const result = observationOf(await run(["inspect", "--json", "--host", typedHost]));
+        assert.deepEqual(result.observation.source, { kind: "host", ref: `[::1]:${v6.port}`, servername: null }, typedHost);
+    }
+});
+
+test("the host is always given with --host: a path that looks like host:port is a file, and a path given to --host is a host", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    const dir = scratch(t);
+
+    // Nothing is guessed from the colon: this is a file that does not exist.
+    const asPath = await run(["inspect", hostOf(server)], { cwd: dir });
+    assert.equal(asPath.code, 3);
+    assert.match(asPath.stderr, /^certdrift: cannot read 127\.0\.0\.1:\d+: ENOENT/);
+
+    // Nor from the file existing: a file with that name is read as a file, and --host is still a host.
+    writeFileSync(join(dir, hostOf(server)), pemOf(SERVED));
+    const asFile = observationOf(await run(["inspect", "--json", hostOf(server)], { cwd: dir }));
+    assert.deepEqual(asFile.observation.source, { kind: "file", ref: hostOf(server) });
+    const asHost = observationOf(await run(["inspect", "--json", "--host", hostOf(server)], { cwd: dir }));
+    assert.deepEqual(asHost.observation.source, { kind: "host", ref: hostOf(server), servername: null });
+
+    // A path after --host is a host name that does not read: it is not opened as a file.
+    const path = await run(["inspect", "--host", typed("leaf-p256.pem")], { cwd: CWD });
+    assert.equal(path.code, 2);
+    assert.equal(path.stdout, "");
+    await sleep(50);
+    assert.equal(server.accepted(), 1, "only the one --host run connected");
+});
+
+test("--host together with a path or with - exits 2 and says why; with neither, it is the usage message of before", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    const host = hostOf(server);
+    /** @type {[string, string[]][]} */
+    const table = [
+        ["a path", ["inspect", "--host", host, typed("leaf-p256.pem")]],
+        ["a path before the flag", ["inspect", typed("leaf-p256.pem"), "--host", host]],
+        ["-", ["inspect", "--host", host, "-"]],
+        ["two paths", ["inspect", "--host", host, "a.pem", "b.pem"]],
+        ["a path after --", ["inspect", "--host", host, "--", "-x.pem"]],
+    ];
+    for (const [name, args] of table) {
+        const result = await run(args, { cwd: CWD, input: fixture("leaf-p256.pem") });
+        assert.deepEqual([name, result.code, result.stdout], [name, 2, ""]);
+        assert.match(result.stderr, /^certdrift: --host takes no path and no "-"/, name);
+        assert.match(result.stderr, /Usage: certdrift inspect /, name);
+    }
+
+    const neither = await run(["inspect"]);
+    assert.equal(neither.code, 2);
+    assert.match(neither.stderr, /^certdrift: no path given/);
+    assert.match(neither.stderr, /Usage: certdrift inspect .*<path \| ->/);
+    assert.ok(neither.stderr.trimEnd().split("\n").length <= 4, `a short message, got:\n${neither.stderr}`);
+
+    // A flag that takes the host, left without one, is misuse too.
+    for (const args of [["inspect", "--host"], ["inspect", "--host", "--json"], ["inspect", "--host", host, "--host", host]]) {
+        const result = await run(args);
+        assert.deepEqual([args.join(" "), result.code, result.stdout], [args.join(" "), 2, ""]);
+    }
+    await sleep(50);
+    assert.equal(server.accepted(), 0, "none of these connected");
+});
+
+test("--servername sets the server name sent in the handshake and recorded in the source", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    const sent = observationOf(await run(["inspect", "--json", "--host", hostOf(server), "--servername", "Api.Example.com"]));
+    assert.deepEqual(sent.observation.source, { kind: "host", ref: hostOf(server), servername: "Api.Example.com" });
+    assert.deepEqual(server.names, ["Api.Example.com"]);
+
+    // Without it an IP address sends none, and the source says so.
+    const none = observationOf(await run(["inspect", "--json", "--host", hostOf(server)]));
+    assert.deepEqual(none.observation.source, { kind: "host", ref: hostOf(server), servername: null });
+    assert.deepEqual(server.names, ["Api.Example.com"]);
+
+    // A name that can not be sent is refused before connecting, with the module's reason.
+    const refused = await serveChain(t, { certs: SERVED });
+    for (const servername of ["", "192.0.2.1", "bücher.example", "a b"]) {
+        const result = await run(["inspect", "--host", hostOf(refused), `--servername=${servername}`]);
+        assert.deepEqual([servername, result.code, result.stdout], [servername, 2, ""]);
+        assert.match(result.stderr, /^certdrift: options\.servername must be a host name/, servername);
+    }
+    await sleep(50);
+    assert.equal(refused.accepted(), 0);
+});
+
+test("--timeout sets the longest wait, and a value that is not a positive integer exits 2 without connecting", async (t) => {
+    const silent = await serveSilent(t);
+    const before = Date.now();
+    const timedOut = await run(["inspect", "--host", hostOf(silent), "--timeout", "200"]);
+    assert.equal(timedOut.code, 3);
+    assert.equal(timedOut.stdout, "");
+    assert.match(timedOut.stderr, /did not answer in time: no answer from 127\.0\.0\.1:\d+ within 200 ms/);
+    assert.ok(Date.now() - before < 8000, "far less than the default of 10000 ms");
+
+    const server = await serveChain(t, { certs: SERVED });
+    const refused = ["0", "-1", "abc", "1.5", "1e3", "0x10", " 5", "5 ", "+5", "010", "", "2147483648", "9".repeat(400), "٣"];
+    for (const value of refused) {
+        const result = await run(["inspect", "--host", hostOf(server), `--timeout=${value}`]);
+        assert.deepEqual([JSON.stringify(value), result.code, result.stdout], [JSON.stringify(value), 2, ""]);
+        assert.match(result.stderr, /^certdrift: (--timeout needs a positive whole number|options\.timeoutMs must be)/, JSON.stringify(value));
+    }
+    for (const args of [["--timeout", "0"], ["--timeout", "-5"], ["--timeout"], ["--timeout", "100", "--timeout", "100"]]) {
+        const result = await run(["inspect", "--host", hostOf(server), ...args]);
+        assert.deepEqual([args.join(" "), result.code, result.stdout], [args.join(" "), 2, ""]);
+    }
+    // A good value is used: the command waits that long and then connects.
+    assert.equal((await run(["inspect", "--host", hostOf(server), "--timeout", "5000"])).code, 0);
+    assert.equal((await run(["inspect", "--host", hostOf(server), "--timeout=5000"])).code, 0);
+
+    // Neither flag means anything without a host, and ignoring one would hide a mistake.
+    for (const args of [["--servername", "a.example"], ["--timeout", "100"]]) {
+        const result = await run(["inspect", ...args, typed("leaf-p256.pem")], { cwd: CWD });
+        assert.deepEqual([args[0], result.code, result.stdout], [args[0], 2, ""]);
+        assert.match(result.stderr, /needs --host/);
+    }
+    await sleep(50);
+    assert.equal(server.accepted(), 2, "only the two good values connected");
+});
+
+test("a host that cannot be reached, one that refuses the connection, one that does not speak TLS and one that does not answer in time each exit 3, with messages that tell them apart", async (t) => {
+    const plain = await serveWith(t, (socket) => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"));
+    const silent = await serveSilent(t);
+    const closed = await closedPort();
+
+    // A multicast address can not be connected to: the system refuses before any packet leaves,
+    // so this needs neither the network nor a name server.
+    /** @type {[string, string[], RegExp][]} */
+    const cases = [
+        ["cannot be reached", ["--host", "224.0.0.1"], /^certdrift: 224\.0\.0\.1: cannot be reached: /],
+        ["refuses the connection", ["--host", `127.0.0.1:${closed}`], new RegExp(`^certdrift: 127\\.0\\.0\\.1:${closed}: connection refused: `)],
+        ["does not speak TLS", ["--host", hostOf(plain)], /^certdrift: 127\.0\.0\.1:\d+: the TLS handshake failed \(the host may not speak TLS\): wrong version number\n$/],
+        ["does not answer in time", ["--host", hostOf(silent), "--timeout", "300"], /^certdrift: 127\.0\.0\.1:\d+: did not answer in time: no answer from /],
+    ];
+    const headlines = [/cannot be reached/, /connection refused/, /the TLS handshake failed/, /did not answer in time/];
+    for (const [position, [name, args, message]] of cases.entries()) {
+        const result = await run(["inspect", ...args]);
+        assert.deepEqual([name, result.code, result.stdout], [name, 3, ""]);
+        assert.match(result.stderr, message, name);
+        // Each message carries its own headline and none of the others'.
+        headlines.forEach((headline, other) => assert.equal(headline.test(result.stderr), other === position, `${name}: ${headline}`));
+    }
+
+    // The same with a way of saying nothing.
+    for (const [name, args] of cases) {
+        const result = await run(["inspect", "-q", ...args]);
+        assert.deepEqual([name, result.code, result.stdout, result.stderr], [name, 3, "", ""]);
+    }
+});
+
+test("today: a server that resets the connection at once exits 3, whichever class Node.js gives the reset on this system", async (t) => {
+    const server = await serveWith(t, (socket) => socket.resetAndDestroy());
+    const result = await run(["inspect", "--host", hostOf(server)]);
+    assert.deepEqual([result.code, result.stdout], [3, ""]);
+    assert.match(result.stderr, /^certdrift: 127\.0\.0\.1:\d+: /);
+});
+
+/**
+ * An error as the module raises it, with the Node.js error underneath.
+ * @param {typeof ConnectionError | typeof HandshakeError} Class
+ * @param {string} message
+ * @param {Record<string, unknown>} underneath
+ */
+function wrapped(Class, message, underneath) {
+    return new Class(`module sentence: ${message}`, { cause: Object.assign(new Error(message), underneath) });
+}
+
+test("the message of a host failure follows the error underneath: a name that does not resolve, no route, a refusal and a reset", () => {
+    // A name that does not resolve can not be produced without asking a name server, so it is
+    // tested here, from the error Node.js raises for it.
+    /** @type {[string, string, RegExp][]} */
+    const table = [
+        ["getaddrinfo ENOTFOUND api.example.test", "ENOTFOUND", /^cannot be reached: getaddrinfo ENOTFOUND api\.example\.test$/],
+        ["getaddrinfo EAI_AGAIN api.example.test", "EAI_AGAIN", /^cannot be reached: getaddrinfo EAI_AGAIN/],
+        ["connect ENETUNREACH 192.0.2.1:443", "ENETUNREACH", /^cannot be reached: connect ENETUNREACH/],
+        ["connect EHOSTUNREACH 192.0.2.1:443", "EHOSTUNREACH", /^cannot be reached: connect EHOSTUNREACH/],
+        ["connect EAFNOSUPPORT 224.0.0.1:443", "EAFNOSUPPORT", /^cannot be reached: /],
+        ["connect ETIMEDOUT 192.0.2.1:443", "ETIMEDOUT", /^cannot be reached: /],
+        ["connect ECONNREFUSED 127.0.0.1:443", "ECONNREFUSED", /^connection refused: connect ECONNREFUSED 127\.0\.0\.1:443$/],
+        ["connect ECONNRESET", "ECONNRESET", /^connection refused: connect ECONNRESET$/],
+    ];
+    for (const [message, code, expected] of table) {
+        assert.match(String(hostFailure(wrapped(ConnectionError, message, { code }))), expected, code);
+    }
+    // A connection error with nothing underneath is not a refusal.
+    assert.match(String(hostFailure(new ConnectionError("could not connect to a:443"))), /^cannot be reached: could not connect to a:443$/);
+
+    // The other two classes, with OpenSSL's reason and without a cause.
+    assert.equal(
+        hostFailure(wrapped(HandshakeError, "80BFA75BF87F0000:error:0A00010B:SSL routines:wrong version number\n", { reason: "wrong version number", code: "ERR_SSL_WRONG_VERSION_NUMBER" })),
+        "the TLS handshake failed (the host may not speak TLS): wrong version number",
+    );
+    assert.equal(
+        hostFailure(new HandshakeError("a:443 completed the handshake without a certificate")),
+        "the TLS handshake failed (the host may not speak TLS): a:443 completed the handshake without a certificate",
+    );
+    assert.equal(hostFailure(new TimeoutError("no answer from a:443 within 5 ms while connecting")), "did not answer in time: no answer from a:443 within 5 ms while connecting");
+
+    // Anything else is not for this function to explain: a bug must still show.
+    for (const other of [new TypeError("x"), new Error("x"), new RangeError("x"), "text", null, undefined, { name: "TimeoutError" }, new DOMException("t", "TimeoutError")]) {
+        assert.equal(hostFailure(other), undefined, String(other));
+    }
+});
+
+test("text from the host and the --host value as typed are escaped like any other text from a certificate", async () => {
+    const hostile = `evil\u001b]0;pwned\u0007‮\u0085.example`;
+    const reasons = [
+        wrapped(ConnectionError, `getaddrinfo ENOTFOUND ${hostile}`, { code: "ENOTFOUND" }),
+        wrapped(ConnectionError, `connect ECONNREFUSED ${hostile}`, { code: "ECONNREFUSED" }),
+        wrapped(HandshakeError, "x", { reason: hostile }),
+        new TimeoutError(`no answer from ${hostile}`),
+    ];
+    for (const error of reasons) {
+        const text = String(hostFailure(error));
+        assert.equal(UNSAFE.test(text), false, text);
+        assert.ok(text.includes("evil\\u{1B}]0;pwned\\u{7}\\u{202E}\\u{85}.example"), text);
+    }
+
+    // The value typed after --host reaches the module's refusal, which quotes it with JSON.stringify:
+    // that writes the escape and the bell as text and leaves the right-to-left override and the
+    // C1 control as they are, so only the command's own escaping covers them.
+    /** @type {[string[], boolean][]} */
+    const typedValues = [
+        [["--host", hostile], true],
+        [["--host", `${hostile}:443`], true],
+        [[`--host=[${hostile}]`], true],
+        // The refusal of a server name does not quote it, and must not carry it either.
+        [["--host", "127.0.0.1:1", "--servername", hostile], false],
+    ];
+    for (const [args, echoed] of typedValues) {
+        const result = await run(["inspect", ...args]);
+        assert.deepEqual([result.code, result.stdout], [2, ""], args.join(" "));
+        assert.equal(UNSAFE.test(result.stderr), false, JSON.stringify(result.stderr));
+        assert.equal(result.stderr.includes("pwned\\u0007\\u{202E}\\u{85}.example"), echoed, result.stderr);
+    }
+});
+
+test("--verbose, --json, --quiet and --query work with --host as with a file, and the output is the one present() and serializeObservation() write", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    const host = hostOf(server);
+    const source = { kind: "host", ref: host, servername: null };
+
+    const json = await run(["inspect", "--json", "--host", host]);
+    const observation = observationOf(json);
+    assert.equal(json.stderr, "");
+    assert.deepEqual(errorsOf(observation), []);
+    // The same bytes as the library gives for what the server sent, at the instant the command chose.
+    const reference = inspect(pemOf(SERVED), { at: new Date(observation.observation.at), source });
+    assert.equal(json.stdout, serializeObservation(reference));
+
+    const verbose = await run(["inspect", "--verbose", "--host", host]);
+    assert.equal(verbose.code, 0, verbose.stderr);
+    assert.equal(withoutTimeRemaining(verbose.stdout), withoutTimeRemaining(present(inspect(pemOf(SERVED), { at: AT, source }), { verbose: true, colour: false })));
+    assert.ok(verbose.stdout.includes("  key sha256  "), "the detail --verbose adds");
+
+    // --quiet keeps the exit code, for a success and for a host that fails.
+    const quiet = await run(["inspect", "-q", "--host", host]);
+    assert.deepEqual([quiet.code, quiet.stdout, quiet.stderr], [0, "", ""]);
+
+    // --query reads the document --json prints, including the server name that was not sent.
+    /** @type {[string, string][]} */
+    const queries = [
+        ["certificates[0].sha256", sha256Of("leaf-p256.pem")],
+        ["observation.source.servername", "null"],
+        ["observation.source.ref", host],
+        ["observation.source", JSON.stringify(source)],
+        ["certificates[2].selfSigned", "true"],
+    ];
+    for (const [path, text] of queries) {
+        const result = await run(["inspect", "--query", path, "--host", host]);
+        assert.deepEqual([path, result.code, result.stdout, result.stderr], [path, 0, `${text}\n`, ""]);
+    }
+    const outOfRange = await run(["inspect", "--query", "certificates[9].sha256", "--host", host]);
+    assert.deepEqual([outOfRange.code, outOfRange.stdout], [0, ""]);
+    assert.match(outOfRange.stderr, /out of range/);
+
+    // A path the schema does not declare is checked before any connection: the port is closed and
+    // the answer is still misuse, as it is for a file that does not exist.
+    const closed = `127.0.0.1:${await closedPort()}`;
+    const typo = await run(["inspect", "--query", "certificates[0].nope", "--host", closed]);
+    assert.deepEqual([typo.code, typo.stdout], [2, ""]);
+    assert.match(typo.stderr, /unknown field in observation v1/);
+    assert.equal((await run(["inspect", "--query", "target", "--host", closed])).code, 3);
+    for (const flags of [["--json"], ["--verbose"], ["-q"]]) {
+        assert.equal((await run(["inspect", ...flags, "--host", closed])).code, 3, flags.join(" "));
+    }
+    // And --query still refuses --json and --verbose with a host.
+    assert.equal((await run(["inspect", "--query", "target", "--json", "--host", host])).code, 2);
+});
+
+test("with --host standard input is neither read nor waited for, and the exit code does not depend on it", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    const open = await run(["inspect", "--json", "--host", hostOf(server)], { openStdin: true });
+    assert.equal(open.code, 0, open.stderr);
+    const closed = await run(["inspect", "--host", `127.0.0.1:${await closedPort()}`], { openStdin: true });
+    assert.equal(closed.code, 3);
+    const piped = await run(["inspect", "--json", "--host", hostOf(server)], { input: fixture("leaf-rsa.pem") });
+    assert.equal(observationOf(piped).certificates[0].sha256, sha256Of("leaf-p256.pem"), "what the server sent, not what was piped in");
+});
+
+test("no flag writes into the observation's source over a host either, and the source is the one fetchChain returns", async (t) => {
+    // Every flag of the command is either in FLAG_ARGUMENTS or one of these.
+    const server = await serveChain(t, { certs: SERVED });
+    const host = hostOf(server);
+    const prefix = sha256Of("leaf-p256.pem").slice(0, 12);
+
+    /** @type {[string, string[], import("../src/tls/index.js").FetchChainOptions][]} */
+    const table = [
+        ["host", [], {}],
+        ["servername", ["--servername", "named.example"], { servername: "named.example" }],
+        ["timeout", ["--timeout", "5000"], { timeoutMs: 5000 }],
+        ["json", ["--json"], {}],
+        ["verbose", ["--json", "--verbose"], {}],
+        ["quiet", ["--json", "--quiet"], {}],
+        ["select", ["--json", "--select", prefix], {}],
+        ["query", ["--query", "observation.source"], {}],
+    ];
+    for (const flag of HOST_FLAGS) assert.ok(table.some(([name]) => name === flag), `${flag} is shown`);
+    for (const [flag, flags, options] of table) {
+        const expectedSource = (await fetchChain(host, options)).source;
+        const result = await run(["inspect", ...(flags.includes("--query") || flags.includes("--json") ? [] : ["--json"]), ...flags, "--host", host]);
+        if (flag === "quiet") {
+            assert.deepEqual([result.code, result.stdout], [0, ""], flag);
+            continue;
+        }
+        if (flag === "query") {
+            assert.equal(result.stdout, `${JSON.stringify(expectedSource)}\n`, flag);
+            continue;
+        }
+        const { source } = observationOf(result).observation;
+        assert.deepEqual(source, expectedSource, flag);
+        assert.deepEqual(Object.keys(source), ["kind", "ref", "servername"], flag);
+        assert.equal(source.kind, "host");
+    }
+});
+
+test("over every leaf fixture a server can send, the command produces only a host source, and it is the one fetchChain returns", async (t) => {
+    // leaf-sm2 is not here: tls.createServer itself refuses an SM2 certificate.
+    const names = [
+        "rsa", "rsa-pss", "p256", "p384", "p521", "ed25519", "ml-dsa-44", "brainpool", "no-cn", "multi-dn", "san-kinds",
+        "san-comma", "san-quotes", "serial-zero", "serial-negative", "expired", "6-days", "zero-validity",
+    ];
+    for (const name of names) {
+        const server = await serveChain(t, { certs: [`leaf-${name}.pem`, "intermediate.pem"], key: `leaf-${name}.key` });
+        const result = await run(["inspect", "--json", "--host", hostOf(server)]);
+        const observation = observationOf(result);
+        assert.deepEqual(errorsOf(observation), [], name);
+        assert.deepEqual(observation.observation.source, (await fetchChain(hostOf(server))).source, name);
+        assert.equal(observation.observation.source.kind, "host", name);
+        assert.equal(observation.certificates[observation.target].sha256, sha256Of(`leaf-${name}.pem`), name);
+    }
+});
+
+test("a server that sends several end-entity certificates exits 2 listing the candidates, and --select resolves it as it does for a file", async (t) => {
+    const certs = ["leaf-p256.pem", "leaf-rsa.pem"];
+    const server = await serveChain(t, { certs });
+    const host = hostOf(server);
+
+    const ambiguous = await run(["inspect", "--host", host]);
+    assert.deepEqual([ambiguous.code, ambiguous.stdout], [2, ""]);
+    assert.ok(ambiguous.stderr.startsWith(`certdrift: ${host}: `), ambiguous.stderr);
+    for (const name of certs) assert.ok(ambiguous.stderr.includes(sha256Of(name)), `lists ${name}`);
+    assert.match(ambiguous.stderr, /Use --select/);
+
+    for (const name of certs) {
+        const chosen = observationOf(await run(["inspect", "--json", "--select", sha256Of(name).slice(0, 12), "--host", host]));
+        assert.equal(chosen.certificates[chosen.target].sha256, sha256Of(name));
+        assert.deepEqual(chosen.observation.source, { kind: "host", ref: host, servername: null });
+    }
+    const none = await run(["inspect", "--select", "0".repeat(10), "--host", host]);
+    assert.equal(none.code, 2);
+    assert.match(none.stderr, /matches no candidate/);
+});
+
+test("the help and the README describe --host, --servername and --timeout, and exit 3 covers a host", async () => {
+    const help = (await run(["--help"])).stdout;
+    for (const flag of ["--host <host[:port]>", "--servername <name>", "--timeout <ms>"]) {
+        assert.ok(help.split("\n").some((line) => line.startsWith(`  ${flag}  `)), `the options list has ${flag}`);
+    }
+    const text = help.replace(/\s+/g, " ");
+    assert.match(text, /certdrift inspect --host '\[2001:db8::1\]:443'/);
+    assert.match(text, /443 unless given/);
+    assert.match(text, /an IP address sends none unless it is given/);
+    assert.match(text, /It is 10000 unless given/);
+    assert.match(text, /The host is always given with --host\. A path is always a file/);
+    assert.match(text, /3 The file is missing or unreadable, the material is not a certificate, or the host cannot be reached, refuses the connection, does not speak TLS or does not answer in time\./);
+    assert.match(text, /nothing says whether this machine would trust them/);
+
+    const readmeText = readme();
+    for (const part of ["--host", "--servername", "--timeout", "--host '[2001:db8::1]:443'", "The port is 443 unless given", "exit with code 3", "--select chooses"]) {
+        assert.ok(readmeText.includes(part), `the README says: ${part}`);
+    }
+    // The usage line shows both ways of using the command.
+    assert.match(help, /^Usage: certdrift inspect .*<path \| ->\n {7}certdrift inspect .*--host <host\[:port\]>$/m);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Cases the criteria do not name and the purpose of --host covers
+
+test("a --host value that is a URL, a path, a port out of range, a zone, a trailing dot or an abbreviated address exits 2 and connects to nothing", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    const refused = [
+        "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:080", "127.0.0.1: 443", `127.0.0.1:${server.port}:1`,
+        "[fe80::1%25en0]:443", "[::1]443", "[::1", "::ffff:127.0.0.1",
+        "https://example.com", "example.com/", "example.com.", "127.1", "0x7f.1", " 127.0.0.1", "127.0.0.1 ",
+    ];
+    for (const value of refused) {
+        const result = await run(["inspect", `--host=${value}`]);
+        assert.deepEqual([JSON.stringify(value), result.code, result.stdout], [JSON.stringify(value), 2, ""]);
+        assert.match(result.stderr, /^certdrift: target .* cannot be read: /, JSON.stringify(value));
+    }
+    await sleep(50);
+    assert.equal(server.accepted(), 0);
+
+    // The flag may be written with an equals sign, and after everything else.
+    const equals = observationOf(await run(["inspect", `--host=${hostOf(server)}`, "--json"]));
+    assert.equal(equals.observation.source.ref, hostOf(server));
+});
+
+test("today: a URL given to --host is refused with a reason about the port, because the colon after https is read as the port's", async () => {
+    // The refusal is right and the reason is not the helpful one. It is the module's wording, and
+    // it is pinned here as it is so that a change to it is noticed, not as the message to keep.
+    const result = await run(["inspect", "--host", "https://example.com"]);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /^certdrift: target "https:\/\/example\.com" cannot be read: the port must be a whole number from 1 to 65535\n/);
+});
+
+test("a certificate that has expired, or has no lifetime, is printed like any other and exits 0: the command does not judge what the server serves", async (t) => {
+    for (const name of ["expired", "zero-validity", "6-days"]) {
+        const server = await serveChain(t, { certs: [`leaf-${name}.pem`, "intermediate.pem"], key: `leaf-${name}.key` });
+        const result = await run(["inspect", "--host", hostOf(server)]);
+        assert.equal(result.code, 0, `${name}: ${result.stderr}`);
+        assert.equal(result.stderr, "", name);
+        assert.match(result.stdout, /^Target\n/, name);
+        assert.match(result.stdout, /\n  remaining   /, name);
+    }
+});
+
+test("every host failure ends the process by itself long before the default timeout, and prints one line of its own", async (t) => {
+    const plain = await serveWith(t, (socket) => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"));
+    const closed = await closedPort();
+    for (const target of [`127.0.0.1:${closed}`, hostOf(plain), "224.0.0.1"]) {
+        const before = Date.now();
+        const result = await run(["inspect", "--host", target]);
+        assert.equal(result.code, 3, target);
+        assert.ok(Date.now() - before < 5000, `${target} took ${Date.now() - before} ms`);
+        assert.equal(result.stderr.trimEnd().split("\n").length, 1, result.stderr);
+        assert.equal(result.stderr.includes(ESC), false);
+    }
+});
+
+/** Makes the connection code itself fail, as a bug in it would: the arguments were fine. */
+const throwing = (/** @type {string} */ error) => `data:text/javascript,${encodeURIComponent(`
+import tls from "node:tls";
+tls.connect = () => { throw new ${error}("a bug inside the connection code"); };
+`)}`;
+
+test("a TypeError or any other error that is not one of the three the module raises for a host is a bug and is not caught: it is neither misuse (2) nor a host failure (3)", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    for (const error of ["TypeError", "RangeError", "Error"]) {
+        const result = await run(["inspect", "--host", hostOf(server)], { nodeArguments: ["--import", throwing(error)] });
+        assert.equal(result.code, 1, `${error}: ${result.stderr}`);
+        assert.equal(result.stdout, "");
+        assert.match(result.stderr, new RegExp(`${error}: a bug inside the connection code`));
+        assert.equal(result.stderr.startsWith("certdrift: "), false, "not worded as the command's own message");
+    }
+    await sleep(50);
+    assert.equal(server.accepted(), 0);
 });
