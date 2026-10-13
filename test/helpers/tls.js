@@ -126,6 +126,10 @@ export async function serveChain(t, { certs = ["leaf-p256.pem", "intermediate.pe
     const server = createTlsServer({
         key: fixture(key),
         cert: Buffer.concat(certs.map(fixture)),
+        // An empty store keeps the server to what it is given. With the default one, OpenSSL
+        // completes a chain from the certificates this process trusts (`NODE_EXTRA_CA_CERTS`
+        // included) and sends the issuer that the test said it would not send.
+        ca: [],
         // The callback only records the name. Without it the server never learns whether one was sent.
         SNICallback: (name, done) => {
             names.push(name);
