@@ -2,10 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { X509Certificate } from "node:crypto";
 import { getEventListeners } from "node:events";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { TLSSocket } from "node:tls";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { TLSSocket, getCACertificates } from "node:tls";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import * as core from "../src/index.js";
 import { inspect } from "../src/index.js";
 import { ConnectionError, HandshakeError, TimeoutError, fetchChain } from "../src/tls/index.js";
@@ -45,6 +46,40 @@ async function rejection(promise) {
         return error;
     }
     return assert.fail("expected the promise to reject");
+}
+
+/**
+ * Fetches from the servers on those ports in a new process whose trust store holds the given
+ * fixtures, and returns what each fetch gave as fingerprints. The store is read once, when
+ * Node.js starts, which is why this takes a process. A store that cannot be used does not stop
+ * the process: a missing file prints a warning, and an empty or unreadable one prints nothing,
+ * and either leaves the process trusting nothing extra. So the process reports what it holds
+ * and this asserts it is the store the test meant to have: a test cannot pass without it.
+ * @param {string[]} store Fixture names, which are the certificates the process trusts.
+ * @param {number[]} ports
+ * @returns {Promise<string[][]>} One list of fingerprints per port, in the order sent.
+ */
+async function fetchWithStore(store, ports) {
+    const dir = mkdtempSync(join(tmpdir(), "certdrift-"));
+    try {
+        const file = join(dir, "store.pem");
+        writeFileSync(file, Buffer.concat(store.map(fixture)));
+        const child = await runChild(`
+            import { fetchChain } from ${JSON.stringify(MODULE_URL)};
+            import { getCACertificates } from "node:tls";
+            const chains = [];
+            for (const port of ${JSON.stringify(ports)}) {
+                chains.push(Buffer.from((await fetchChain("127.0.0.1:" + port)).bytes).toString("utf8"));
+            }
+            console.log(JSON.stringify({ extra: getCACertificates("extra"), chains }));
+        `, { env: { NODE_EXTRA_CA_CERTS: file } });
+        assert.deepEqual([child.code, child.signal, child.stderr], [0, null, ""], child.stderr);
+        const { extra, chains } = JSON.parse(child.stdout);
+        assert.deepEqual(extra.map(fingerprint).sort(), fingerprintsOfFixtures(store).sort(), "the process does not trust what the test says it trusts");
+        return chains.map((/** @type {string} */ text) => fingerprintsOf(Buffer.from(text)));
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -215,20 +250,141 @@ test("an IPv6 loopback target connects, sends no server name and keeps its brack
     assert.deepEqual(server.names, []);
 });
 
-test("a brainpool chain whose root the trust store holds is fetched without killing the process", async (t) => {
+test("a brainpool chain whose root the trust store holds is fetched without killing the process, and holds what was sent", async (t) => {
     // Node.js crashes with a segmentation fault when a chain with a brainpool key verifies
     // against the store, so the store has to hold the root before the process starts.
-    const server = await serveChain(t, { certs: ["leaf-brainpool.pem", "intermediate.pem"], key: "leaf-brainpool.key" });
-    const child = await runChild(`
-        import { fetchChain } from ${JSON.stringify(MODULE_URL)};
-        import { X509Certificate } from "node:crypto";
-import { getEventListeners } from "node:events";
-        const { bytes } = await fetchChain("127.0.0.1:${server.port}");
-        console.log(new X509Certificate(bytes).fingerprint256);
-    `, { env: { NODE_EXTRA_CA_CERTS: fileURLToPath(new URL("fixtures/root-ca.pem", import.meta.url)) } });
-    // Which other certificates come back is not asserted: what the store adds is not this module's claim.
-    assert.deepEqual([child.code, child.signal], [0, null], child.stderr);
-    assert.equal(child.stdout.trim(), fingerprint(fixture("leaf-brainpool.pem")));
+    const sent = ["leaf-brainpool.pem", "intermediate.pem"];
+    const server = await serveChain(t, { certs: sent, key: "leaf-brainpool.key" });
+    assert.deepEqual(await fetchWithStore(["root-ca.pem"], [server.port]), [fingerprintsOfFixtures(sent)]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// What the chain holds
+//
+// A server that sends fewer certificates than the machine's trust store could complete must
+// still be seen sending fewer, and the same server must give the same chain from any machine.
+// Each case that needs a store runs in a new process started with it, because Node.js reads
+// `NODE_EXTRA_CA_CERTS` once, at start-up.
+
+test("with the root in the trust store, a server that sends its leaf and its intermediate gives exactly those two, in the order sent, and not the root", async (t) => {
+    const sent = ["leaf-p256.pem", "intermediate.pem"];
+    const server = await serveChain(t, { certs: sent });
+    const [chain] = await fetchWithStore(["root-ca.pem"], [server.port]);
+    assert.deepEqual(chain, fingerprintsOfFixtures(sent));
+    assert.ok(!chain.includes(fingerprint(fixture("root-ca.pem"))), "the root was not sent");
+});
+
+test("a chain that includes its root is returned with it, also when the trust store holds that root: a certificate that was sent is never dropped", async (t) => {
+    const sent = ["leaf-p256.pem", "intermediate.pem", "root-ca.pem"];
+    const server = await serveChain(t, { certs: sent });
+    for (const store of [["root-ca.pem"], ["intermediate.pem"], ["root-ca.pem", "intermediate.pem"]]) {
+        assert.deepEqual(await fetchWithStore(store, [server.port]), [fingerprintsOfFixtures(sent)], store.join(" + "));
+    }
+    // From a process that trusts none of them, too.
+    assert.deepEqual(fingerprintsOf((await fetchChain(`127.0.0.1:${server.port}`)).bytes), fingerprintsOfFixtures(sent));
+});
+
+test("a leaf sent first and the rest in an order that is not the order they sign each other keeps the order of the server, and inspect() finds the leaf as the target", async (t) => {
+    // The first certificate has to be the leaf: tls.createServer refuses a list whose first
+    // certificate does not match the key. What follows is what can be out of order.
+    const sent = ["leaf-p256.pem", "root-ca.pem", "intermediate.pem"];
+    const server = await serveChain(t, { certs: sent });
+    const { bytes, source } = await fetchChain(`127.0.0.1:${server.port}`);
+    const results = [fingerprintsOf(bytes), ...(await fetchWithStore(["root-ca.pem", "intermediate.pem"], [server.port]))];
+    for (const chain of results) assert.deepEqual(chain, fingerprintsOfFixtures(sent));
+
+    const observation = inspect(bytes, { source, at: AT });
+    assert.equal(observation.target, 0);
+    assert.equal(observation.certificates[observation.target].sha256, fingerprint(fixture("leaf-p256.pem")).replaceAll(":", "").toLowerCase());
+    assert.deepEqual(observation.certificates.map((certificate) => certificate.sha256), fingerprintsOfFixtures(sent).map((value) => value.replaceAll(":", "").toLowerCase()));
+});
+
+test("with the intermediate that issued it in the trust store, a server that sends only its leaf gives exactly one certificate", async (t) => {
+    const server = await serveChain(t, { certs: ["leaf-p256.pem"] });
+    const leaf = fingerprintsOfFixtures(["leaf-p256.pem"]);
+    const issuer = fingerprint(fixture("intermediate.pem"));
+
+    for (const store of [["intermediate.pem"], ["root-ca.pem", "intermediate.pem"]]) {
+        assert.deepEqual(await fetchWithStore(store, [server.port]), [leaf], store.join(" + "));
+    }
+    // This process does not hold the intermediate, and gets the same one certificate: the leaf is
+    // all the server sent, so nothing in the chain came from a store.
+    assert.ok(!getCACertificates("default").some((pem) => fingerprint(pem) === issuer), "this process trusts the intermediate");
+    assert.deepEqual(fingerprintsOf((await fetchChain(`127.0.0.1:${server.port}`)).bytes), leaf);
+});
+
+test("the documentation names the Node.js versions the chain was checked on, and every line that CI runs", () => {
+    const source = readFileSync(new URL("../src/tls/index.js", import.meta.url), "utf8");
+    const paragraph = /Checked on Node\.js[\s\S]*?\n \*\n/.exec(source)?.[0].replaceAll(/\n \* ?/g, " ");
+    assert.ok(paragraph, "the documentation has no sentence that starts with \"Checked on Node.js\"");
+    const versions = paragraph.match(/\b\d+\.\d+\.\d+\b/g) ?? [];
+    assert.ok(versions.length > 0, paragraph);
+
+    const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+    const lines = [...workflow.matchAll(/\bnode:\s*\[([^\]]+)\]/g)].flatMap((match) => match[1].split(",").map((line) => line.trim()));
+    assert.ok(lines.length > 0, "no node: [...] matrix found in the workflow");
+    // A major that appears only inside a version, such as the 24 of 24.7.0, does not count.
+    const mentioned = paragraph.replaceAll(/\b\d+\.\d+\.\d+\b/g, "");
+    for (const line of new Set(lines)) {
+        assert.match(mentioned, new RegExp(`\\b${line}\\b`), `CI runs Node.js ${line} and the documentation does not name it`);
+    }
+});
+
+test("the chain does not depend on how long the certificates are valid: expired, soon expiring and zero-validity leaves give what was sent, whatever the store holds", async (t) => {
+    const leaves = ["expired", "6-days", "zero-validity"];
+    const cases = [
+        ...leaves.map((name) => ({ certs: [`leaf-${name}.pem`], key: `leaf-${name}.key` })),
+        ...leaves.map((name) => ({ certs: [`leaf-${name}.pem`, "intermediate.pem"], key: `leaf-${name}.key` })),
+    ];
+    const servers = await Promise.all(cases.map((one) => serveChain(t, one)));
+    const expected = cases.map(({ certs }) => fingerprintsOfFixtures(certs));
+    for (const store of [["root-ca.pem"], ["intermediate.pem"], ["root-ca.pem", "intermediate.pem"]]) {
+        assert.deepEqual(await fetchWithStore(store, servers.map((server) => server.port)), expected, store.join(" + "));
+    }
+});
+
+test("a certificate that the server completes its chain with from its own trust store was sent, and is returned", async (t) => {
+    // OpenSSL adds the issuer to what it sends when the server's store holds it, so the client
+    // receives it. It is on the wire, whoever put it there.
+    const server = await serveChain(t, { certs: ["leaf-p256.pem"], options: { ca: [fixture("intermediate.pem")] } });
+    assert.deepEqual(
+        fingerprintsOf((await fetchChain(`127.0.0.1:${server.port}`)).bytes),
+        fingerprintsOfFixtures(["leaf-p256.pem", "intermediate.pem"]),
+    );
+});
+
+test("whatever the trust store holds, the chain is exactly what was sent: one table of chains against a store with the root, the intermediate and an unrelated root", async (t) => {
+    const rows = [
+        ["leaf-p256.pem"],
+        ["leaf-p256.pem", "intermediate.pem"],
+        ["leaf-p256.pem", "intermediate.pem", "root-ca.pem"],
+        ["leaf-p256.pem", "intermediate.pem", "root-ca.pem", "root-ca-cross.pem", "legacy-root.pem"],
+        ["leaf-p256.pem", "legacy-root.pem", "intermediate.pem"],
+        ["leaf-p256.pem", "intermediate.pem", "intermediate.pem"],
+        ["leaf-p256.pem", "root-ca.pem"],
+    ];
+    const servers = await Promise.all(rows.map((certs) => serveChain(t, { certs })));
+    const chains = await fetchWithStore(["root-ca.pem", "intermediate.pem", "legacy-root.pem"], servers.map((server) => server.port));
+    assert.deepEqual(chains, rows.map(fingerprintsOfFixtures));
+});
+
+test("a certificate the trust store holds is returned when the server sent it, the leaf itself and a chain of roots with the same name included", async (t) => {
+    const rows = [
+        ["leaf-p256.pem"],
+        ["leaf-p256.pem", "intermediate.pem"],
+        ["leaf-p256.pem", "intermediate.pem", "root-ca.pem", "root-ca-renewed.pem", "root-ca-rollover.pem"],
+    ];
+    const servers = await Promise.all(rows.map((certs) => serveChain(t, { certs })));
+    const store = ["leaf-p256.pem", "intermediate.pem", "root-ca.pem", "root-ca-renewed.pem"];
+    assert.deepEqual(await fetchWithStore(store, servers.map((server) => server.port)), rows.map(fingerprintsOfFixtures));
+});
+
+test("over TLS 1.2 as over TLS 1.3, the chain holds only what the server sent", async (t) => {
+    const older = { maxVersion: /** @type {const} */ ("TLSv1.2") };
+    const leafOnly = await serveChain(t, { certs: ["leaf-p256.pem"], options: older });
+    const withIntermediate = await serveChain(t, { certs: ["leaf-p256.pem", "intermediate.pem"], options: older });
+    const chains = await fetchWithStore(["root-ca.pem", "intermediate.pem"], [leafOnly.port, withIntermediate.port]);
+    assert.deepEqual(chains, [fingerprintsOfFixtures(["leaf-p256.pem"]), fingerprintsOfFixtures(["leaf-p256.pem", "intermediate.pem"])]);
 });
 
 test("a chain that cannot be read, or that holds no certificate, rejects with HandshakeError and closes the socket", async (t) => {

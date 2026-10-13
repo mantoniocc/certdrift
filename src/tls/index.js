@@ -5,7 +5,9 @@ import { servernameOf, targetOf } from "./target.js";
 
 // The only place that opens a socket. It returns what the server sends and nothing about how
 // Node.js judged it: whether the local trust store would accept the chain describes this
-// machine, not the certificates, and the observation has no field for it on purpose.
+// machine, not the certificates, and the observation has no field for it on purpose. For the
+// same reason the trust store never adds to the chain: two machines asking the same server get
+// the same certificates, and a server that stops sending its intermediate shows it.
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 // The longest delay a timer takes. A larger one is cut to 1 ms with a warning.
@@ -25,8 +27,8 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 /**
  * What a server sent for a connection.
  * @typedef {object} FetchedChain
- * @property {Uint8Array} bytes One PEM block per certificate, in the order Node.js lists them
- *   for the connection, which `inspect()` accepts as it is.
+ * @property {Uint8Array} bytes One PEM block per certificate, in the order the server sent
+ *   them, which `inspect()` accepts as it is.
  * @property {Source} source `{ kind: "host", ref, servername }`, ready to pass to `inspect()`.
  *   `ref` is `host:port` with the port always written, and `servername` is the name that was
  *   sent, or `null` when none was.
@@ -78,10 +80,14 @@ export class TimeoutError extends Error {
  * certificates are returned like any other: nothing is verified, and nothing is said about
  * whether this machine would trust the chain.
  *
- * The chain is what Node.js exposes for the connection: the certificate the server presented,
- * then each issuer Node.js links to it, until there is none or it is one already seen. Node.js
- * links a certificate to its issuer with the local trust store as well as with what the server
- * sent, so the chain may hold a certificate the server did not send.
+ * The chain is the certificates the server sent, in the order it sent them, and nothing else:
+ * a certificate that this machine's trust store holds is not added, and one that the server
+ * sent is not dropped because the store holds it too. A server that sends only its own
+ * certificate gives a chain of one, whichever issuer the store has.
+ *
+ * Checked on Node.js 24.7.0, 24.19.0, 24.21.0 and 26.11.1, and on the 24 and 26 lines that
+ * continuous integration runs, each with the issuer or the root in the trust store. The tests
+ * are what notice a change in Node.js, not this text.
  *
  * Rejects with `TypeError` for an argument that cannot be used, before any socket is opened,
  * with `ConnectionError` when the network fails, `HandshakeError` when the host does not speak
@@ -171,10 +177,16 @@ export async function fetchChain(target, options) {
 }
 
 /**
- * The certificates Node.js exposes for a connection, as PEM, walked from the peer certificate
- * through its issuer. `getPeerCertificate()` and `toLegacyObject()` are never used: the first
- * also reports a root from the local trust store that the server did not send, and the second
- * does not survive a brainpool key.
+ * The certificates the server sent for a connection, as PEM, walked from the peer certificate
+ * through its issuer.
+ *
+ * `getPeerX509Certificate()` links each certificate only to the next one that was received, so
+ * the local trust store adds nothing. `getPeerCertificate()` is never used: with the default
+ * store it completes the chain with a root or an intermediate that the server did not send, and
+ * it and `toLegacyObject()` both crash the process on a brainpool key.
+ *
+ * The peer certificate is read once. A second call returns nothing on Node.js 24 (it does on
+ * 26), so a chain read twice would be empty the second time.
  *
  * The walk ends when there is no next certificate or it is one already seen, and it compares
  * objects, not bytes: a server may send the same certificate twice, and each copy is a
