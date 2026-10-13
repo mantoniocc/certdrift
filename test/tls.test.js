@@ -546,6 +546,25 @@ test("an already aborted signal rejects with its reason before connecting", asyn
     assert.equal(server.accepted(), 0);
 });
 
+test("the arguments are checked before an already aborted signal is honoured, and a good call still rejects with the signal's reason", async (t) => {
+    // The command asks this way whether its arguments are usable without connecting.
+    const server = await serveSilent(t);
+    const reason = new Error("aborted before it started");
+    const signal = AbortSignal.abort(reason);
+    const bad = /** @type {[string, import("../src/tls/index.js").FetchChainOptions][]} */ ([
+        ["a b", {}],
+        [`127.0.0.1:${server.port}`, { servername: "192.0.2.1" }],
+        [`127.0.0.1:${server.port}`, { timeoutMs: 2 ** 31 }],
+        [`127.0.0.1:${server.port}`, { timeoutMs: 0 }],
+    ]);
+    for (const [target, options] of bad) {
+        await assert.rejects(fetchChain(target, { ...options, signal }), TypeError, target);
+    }
+    assert.equal(await rejection(fetchChain(`127.0.0.1:${server.port}`, { signal })), reason);
+    await sleep(50);
+    assert.equal(server.accepted(), 0);
+});
+
 test("a signal used for many calls keeps no listener once each has ended, and aborting it afterwards changes nothing", async (t) => {
     const ok = await serveChain(t);
     const refused = await closedPort();

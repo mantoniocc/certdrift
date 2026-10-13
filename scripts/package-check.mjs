@@ -334,6 +334,19 @@ test("certdrift/tls imports from the installed package with its declarations, an
         assert.deepEqual(errorsOf(installed.observation), []);
         const reference = inspect(Buffer.concat(chain), { at: AT, source: { kind: "host", ref: `127.0.0.1:${port}`, servername: null } });
         assert.deepEqual(installed.observation, JSON.parse(serializeObservation(reference)));
+
+        // The installed command imports the TLS entry point too: a tarball that lost what it needs
+        // for a host fails here, with the command's own words.
+        const command = join(setup.consumer, "node_modules", ".bin", "certdrift");
+        const viaCommand = await run(command, ["inspect", "--json", "--host", `127.0.0.1:${port}`], setup.consumer);
+        assert.equal(viaCommand.code, 0, shown(viaCommand));
+        const fromCommand = JSON.parse(viaCommand.stdout);
+        assert.deepEqual(errorsOf(fromCommand), []);
+        const referenceAtCommandTime = inspect(Buffer.concat(chain), {
+            at: new Date(fromCommand.observation.at),
+            source: { kind: "host", ref: `127.0.0.1:${port}`, servername: null },
+        });
+        assert.deepEqual(fromCommand, JSON.parse(serializeObservation(referenceAtCommandTime)));
     } finally {
         await new Promise((resolve) => server.close(() => resolve(undefined)));
     }

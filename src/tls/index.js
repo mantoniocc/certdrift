@@ -89,7 +89,9 @@ export class TimeoutError extends Error {
  * continuous integration runs, each with the issuer or the root in the trust store. The tests
  * are what notice a change in Node.js, not this text.
  *
- * Rejects with `TypeError` for an argument that cannot be used, before any socket is opened,
+ * Rejects with `TypeError` for an argument that cannot be used, before any socket is opened and
+ * before the signal is looked at, so a bad argument is refused even when the signal is already
+ * aborted. A caller can rely on that to check its arguments without connecting. It rejects
  * with `ConnectionError` when the network fails, `HandshakeError` when the host does not speak
  * TLS or answers with an alert, `TimeoutError` when `timeoutMs` passes, and with the reason of
  * the signal when it aborts. The socket is closed in every outcome.
@@ -185,8 +187,8 @@ export async function fetchChain(target, options) {
  * store it completes the chain with a root or an intermediate that the server did not send, and
  * it and `toLegacyObject()` both crash the process on a brainpool key.
  *
- * The peer certificate is read once. A second call returns nothing on Node.js 24 (it does on
- * 26), so a chain read twice would be empty the second time.
+ * The peer certificate is read once. A second call returns nothing on Node.js 24; on Node.js 26
+ * it returns the certificate again. A chain read twice would be empty the second time on 24.
  *
  * The walk ends when there is no next certificate or it is one already seen, and it compares
  * objects, not bytes: a server may send the same certificate twice, and each copy is a
