@@ -189,6 +189,19 @@ test("an argument the module refuses is asked first with a signal that is alread
     }
 });
 
+test("an error of the refusal check that is neither the module's TypeError nor the one the aborted signal gives is rethrown as it is, not reported as a refusal", async () => {
+    // A bug in the module's checks must end the command with the error, not read as misuse.
+    const boom = new RangeError("a bug inside the module's checks");
+    const request = {
+        target: "127.0.0.1:1",
+        options: {
+            /** @returns {number} */
+            get timeoutMs() { throw boom; },
+        },
+    };
+    await assert.rejects(refusalOf(request), (error) => error === boom);
+});
+
 test("fetching gives what the server sent, and for a host that fails the line and the exit code", async (t) => {
     const server = await serveChain(t);
     const target = `127.0.0.1:${server.port}`;
