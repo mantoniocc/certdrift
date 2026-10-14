@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/mantoniocc/certdrift/main/schema/policy.schema.json",
+  "title": "certdrift policy",
+  "description": "What a person requires of a certificate: a JSON object with a contract number and one optional entry per kind of rule. Contract version 1. Consumers must tolerate properties they do not know. A policy is a portable document that people share and commit: it holds data only, so it cannot hold a function, and a rule of a consumer's own is code passed to the function that evaluates, never an entry of the policy. It never carries a private key, a passphrase or anything read from them. A policy with no entry besides validityStarted and validityNotEnded, the two rules that are always evaluated whether listed or not, is a policy with no rules: it is valid, and evaluating it, with no rule of a consumer's own either, produces an explicit warning (POLICY_EMPTY), because a policy that checks nothing is a false 'correct' under another name. The time rules (validityStarted, validityNotEnded, expiresWithin, maxLifetimeUsed) are defined on the certificate's original notBefore and notAfter and an instant now, never on the rounded values in derived; now defaults to the observation's at. Every rule is about the certificate the observation targets.",
+  "type": "object",
+  "required": ["contract"],
+  "properties": {
+    "contract": {
+      "description": "Contract version of the policy, carried as the observation carries its own: a program that reads a policy it does not understand must not apply it as if it did, since an entry repurposed in a later version would be read with its old meaning and give a false 'correct'. Adding an entry or a property keeps 1; renaming, removing or repurposing one requires 2. A policy whose number the tool does not know is misuse, not a failed check.",
+      "const": 1
+    },
+    "validityStarted": {
+      "description": "Always evaluated, listed or not. Fails with NOT_YET_VALID when the certificate's notBefore is after now; an instant equal to notBefore is still valid. Only severity is read: listing it lets a policy lower that one rule.",
+      "$ref": "#/$defs/entry"
+    },
+    "validityNotEnded": {
+      "description": "Always evaluated, listed or not. Fails with EXPIRED when the certificate's notAfter is before now; an instant equal to notAfter is still valid. Only severity is read: listing it lets a policy lower that one rule.",
+      "$ref": "#/$defs/entry"
+    },
+    "expiresWithin": {
+      "description": "Fails with EXPIRES_SOON when the time left until notAfter, in seconds, is below the threshold. The threshold is whole days or whole hours, at most six digits and no leading zero, with the unit always written: 30d is 2 592 000 seconds and 72h is 259 200. A certificate that has already ended has negative time left, so it fails this rule as well as validityNotEnded.",
+      "$ref": "#/$defs/entry",
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,5}[dh]$"
+        }
+      }
+    },
+    "maxLifetimeUsed": {
+      "description": "Fails with LIFETIME_USED_EXCEEDED when the fraction of the lifetime used is above the threshold, a number from 0 to 1 with both ends allowed. The fraction is (now - notBefore) / (notAfter - notBefore) on the original dates, and the rule is defined without the division: it fails when now - notBefore is greater than the threshold times notAfter - notBefore. A validity with no duration therefore fails once now is after notBefore, whatever the threshold.",
+      "$ref": "#/$defs/entry",
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "expectEku": {
+      "description": "Fails with EKU_MISSING unless the target lists every usage explicitly. A certificate with no Extended Key Usage extension (eku is null) fails, and so does one whose extension lists nothing (eku is []): the rule asks for a usage to be listed, and neither lists one. null and [] are different cases in the observation and in the other two EKU rules.",
+      "$ref": "#/$defs/entry",
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": { "$ref": "#/$defs/usages" }
+      }
+    },
+    "ekuAllows": {
+      "description": "Fails with EKU_NOT_PERMITTED when the target has an Extended Key Usage extension that does not include every usage. A certificate with no such extension (eku is null) passes, because an absent extension restricts nothing; one whose extension lists nothing (eku is []) fails, because an extension that is present and empty permits nothing.",
+      "$ref": "#/$defs/entry",
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": { "$ref": "#/$defs/usages" }
+      }
+    },
+    "rejectEku": {
+      "description": "Fails with EKU_FORBIDDEN when the target lists any of the usages. Both null and [] pass: neither lists a usage.",
+      "$ref": "#/$defs/entry",
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": { "$ref": "#/$defs/usages" }
+      }
+    },
+    "expectSan": {
+      "description": "Fails with SAN_MISSING when any of the names is not in the target's san. An item is an IP address exactly when it is one the observation could list (it is then compared in the canonical form the observation writes, IPv6 compressed and in lower case, in san.ip). Anything else must be a DNS name: dot separated labels of ASCII letters, digits, hyphens and underscores, whose last label is not a number (so 127.1, 1.2.3 and 010.0.0.1, which a resolver reads as addresses, are refused instead of being names that could never be listed), optionally starting with a * label. A name is compared in lower case against san.dns, as the observation writes it. The wildcard is compared as written: *.example.com is satisfied by a certificate that lists *.example.com, not by one that lists a.example.com. A trailing dot, a zone id and a bare * are refused.",
+      "$ref": "#/$defs/entry",
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "maxLength": 253,
+            "anyOf": [
+              { "pattern": "^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){7}|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){5}:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?|[0-9A-Fa-f]{1,4}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,5})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4})::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,4})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){2}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,3})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){3}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,2})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){4}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,1})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){5}::(?:[0-9A-Fa-f]{1,4})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){6}::|::(?:[0-9A-Fa-f]{1,4}:){0,5}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|[0-9A-Fa-f]{1,4}::(?:[0-9A-Fa-f]{1,4}:){0,4}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4})::(?:[0-9A-Fa-f]{1,4}:){0,3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){2}::(?:[0-9A-Fa-f]{1,4}:){0,2}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){3}::(?:[0-9A-Fa-f]{1,4}:)?(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){4}::(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})$" },
+              { "pattern": "^(?:\\*\\.)?(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?\\.)*(?!(?:[0-9]+|0[xX][0-9A-Fa-f]*)$)[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$" }
+            ]
+          }
+        }
+      }
+    },
+    "expectFingerprint": {
+      "description": "Fails with FINGERPRINT_MISMATCH when the target's sha256 is not this one. Written as the observation writes it: 64 lowercase hexadecimal characters with no separators.",
+      "$ref": "#/$defs/entry",
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": { "$ref": "observation.schema.json#/$defs/sha256" }
+      }
+    },
+    "expectKind": {
+      "description": "Fails with TARGET_NOT_END_ENTITY when the target's kind is not end-entity. Only end-entity is accepted today; a later version may accept more kinds, which keeps this one working. The kind is the one the observation gives, which is the one Node.js reads.",
+      "$ref": "#/$defs/entry",
+      "type": "object",
+      "required": ["value"],
+      "properties": {
+        "value": { "const": "end-entity" }
+      }
+    },
+    "matchesPrivateKey": {
+      "description": "Fails with KEY_MISMATCH when a private key that was read does not correspond to the target's public key, and with KEY_UNREADABLE when the key could not be read (its format, encrypted with no passphrase, or an algorithm that is not supported). Both codes take this one entry's severity. The entry has no value: the key is handed to the function that evaluates, and a policy never carries a private key, a passphrase or anything read from them. A property put here anyway is tolerated like any unknown property, and no result or output ever repeats it.",
+      "$ref": "#/$defs/entry"
+    }
+  },
+  "$defs": {
+    "entry": {
+      "description": "One kind of rule. severity says what happens when the rule does not hold.",
+      "type": "object",
+      "properties": {
+        "severity": { "$ref": "#/$defs/severity" }
+      }
+    },
+    "severity": {
+      "description": "fail, the default, makes the check fail when the rule does not hold. warn reports the rule with status warn and never makes a check fail.",
+      "enum": ["fail", "warn"]
+    },
+    "usages": {
+      "description": "Extended Key Usages: one of the names the observation uses (serverAuth, clientAuth, codeSigning, emailProtection, timeStamping, OCSPSigning) or an OID as dotted text, which is the same usage as its name when it has one. At least one is required: an entry that checks nothing would pass for the wrong reason.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "pattern": "^(?:serverAuth|clientAuth|codeSigning|emailProtection|timeStamping|OCSPSigning|[0-2](?:\\.(?:0|[1-9][0-9]*)){1,})$"
+      }
+    }
+  }
+}

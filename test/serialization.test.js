@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { X509Certificate } from "node:crypto";
-import { inspect, serializeObservation, AmbiguousTargetError } from "../src/index.js";
+import { inspect, serializeObservation, serializeCheckResult, AmbiguousTargetError } from "../src/index.js";
 import { validatorFor } from "./helpers/schema.js";
 
 const fixturesUrl = new URL("fixtures/", import.meta.url);
@@ -233,4 +233,155 @@ test("anything but an object throws a TypeError", () => {
     for (const value of [undefined, null, "{}", 1, [], true]) {
         assert.throws(() => serializeObservation(/** @type {any} */ (value)), TypeError, String(value));
     }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The check result
+
+const checkExamplesUrl = new URL("../schema/examples/check-result/", import.meta.url);
+const CHECK_EXAMPLES = readdirSync(checkExamplesUrl).filter((name) => name.endsWith(".json")).sort();
+
+/** @param {string} name File name in schema/examples/check-result/. */
+const checkExample = (name) => readFileSync(new URL(name, checkExamplesUrl), "utf8");
+
+const CHECK_TOP_LEVEL = ["contract", "now", "summary", "results", "policy", "observation"];
+
+/**
+ * The same value with every object's keys in the opposite order, which is a different way to have
+ * built it.
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function reversed(value) {
+    if (Array.isArray(value)) return value.map(reversed);
+    if (typeof value !== "object" || value === null) return value;
+    return Object.fromEntries(Object.entries(value).reverse().map(([key, inner]) => [key, reversed(inner)]));
+}
+
+test("serializing each check result example reproduces its bytes", () => {
+    assert.ok(CHECK_EXAMPLES.length >= 9, CHECK_EXAMPLES.join(", "));
+    for (const name of CHECK_EXAMPLES) {
+        assert.equal(serializeCheckResult(JSON.parse(checkExample(name))), checkExample(name), name);
+    }
+});
+
+test("one check result built in two ways, with its objects in opposite orders, gives the same bytes", () => {
+    for (const name of CHECK_EXAMPLES) {
+        const forward = JSON.parse(checkExample(name));
+        const backward = reversed(forward);
+        assert.notDeepEqual(Object.keys(/** @type {object} */ (backward)), Object.keys(forward), `${name} was not reordered`);
+        assert.equal(serializeCheckResult(/** @type {any} */ (backward)), serializeCheckResult(forward), name);
+        assert.equal(serializeCheckResult(/** @type {any} */ (backward)), checkExample(name), name);
+    }
+});
+
+test("a check result is written verdict first, the observation last, and every object in the order of the contract", () => {
+    for (const name of CHECK_EXAMPLES) {
+        const written = JSON.parse(serializeCheckResult(/** @type {any} */ (reversed(JSON.parse(checkExample(name))))));
+        assert.deepEqual(Object.keys(written), CHECK_TOP_LEVEL, name);
+        assert.deepEqual(Object.keys(written.summary), ["status", "pass", "warn", "fail"], name);
+        for (const result of written.results) {
+            const named = ["code", "status", "rule", "message", "actual", "expected"].filter((key) => key in result);
+            assert.deepEqual(Object.keys(result), named, name);
+            if (result.rule !== null) assert.deepEqual(Object.keys(result.rule), ["name", "value"].filter((key) => key in result.rule), name);
+        }
+        const entries = Object.keys(written.policy);
+        assert.deepEqual(entries.slice(0, 3), ["contract", "validityStarted", "validityNotEnded"], name);
+        for (const entry of entries.slice(1)) assert.deepEqual(Object.keys(written.policy[entry]), ["value", "severity"].filter((key) => key in written.policy[entry]), `${name} ${entry}`);
+    }
+});
+
+test("the observation inside a check result is written in the observation's own key order, from the same table", () => {
+    for (const name of CHECK_EXAMPLES) {
+        const written = JSON.parse(serializeCheckResult(/** @type {any} */ (reversed(JSON.parse(checkExample(name))))));
+        assert.deepEqual(Object.keys(written.observation), TOP_LEVEL, name);
+        for (const found of written.observation.certificates) assert.deepEqual(Object.keys(found), PER_CERTIFICATE, name);
+        // What the observation serializer writes for it is what the check result holds, indentation aside.
+        assert.equal(serializeObservation(written.observation), serializeObservation(JSON.parse(checkExample(name)).observation), name);
+        assert.deepEqual(JSON.stringify(written.observation), JSON.stringify(JSON.parse(serializeObservation(written.observation))), name);
+    }
+});
+
+test("the expected and actual of a name rule are written in a fixed order whatever order they were built in", () => {
+    const made = JSON.parse(checkExample("ip-san.json"));
+    const reordered = structuredClone(made);
+    const found = reordered.results.find((/** @type {any} */ result) => result.code === "SAN_MISSING");
+    found.actual = { ip: found.actual.ip, dns: found.actual.dns };
+    found.expected = { ip: found.expected.ip, dns: found.expected.dns };
+    assert.deepEqual(Object.keys(found.actual), ["ip", "dns"]);
+    assert.equal(serializeCheckResult(reordered), serializeCheckResult(made));
+    assert.deepEqual(Object.keys(JSON.parse(serializeCheckResult(reordered)).results.find((/** @type {any} */ result) => result.code === "SAN_MISSING").actual), ["dns", "ip"]);
+});
+
+test("keys the contract does not name are kept after the named ones in a check result, sorted, at every depth", () => {
+    const made = JSON.parse(checkExample("own-rule.json"));
+    const written = JSON.parse(serializeCheckResult({
+        zeta: 1,
+        ...made,
+        summary: { zz: 1, ...made.summary, aa: 2 },
+        results: made.results.map((/** @type {any} */ result) => ({ extra: { b: 1, a: 2 }, ...result })),
+        policy: { ...made.policy, futureRule: { severity: "fail", value: 1, note: 2 }, expectKind: { note: 1, ...made.policy.expectKind } },
+        alpha: 2,
+    }));
+    assert.deepEqual(Object.keys(written), [...CHECK_TOP_LEVEL, "alpha", "zeta"]);
+    assert.deepEqual(Object.keys(written.summary), ["status", "pass", "warn", "fail", "aa", "zz"]);
+    assert.deepEqual(Object.keys(written.results[0]), ["code", "status", "rule", "message", "actual", "expected", "extra"]);
+    assert.deepEqual(Object.keys(written.results[0].extra), ["a", "b"]);
+    assert.deepEqual(Object.keys(written.policy), ["contract", "validityStarted", "validityNotEnded", "expectKind", "futureRule"]);
+    assert.deepEqual(Object.keys(written.policy.expectKind), ["value", "severity", "note"]);
+    // An entry this version does not know has no table, so all its keys are sorted.
+    assert.deepEqual(Object.keys(written.policy.futureRule), ["note", "severity", "value"]);
+});
+
+test("a check result ends in one newline and indents with two spaces", () => {
+    for (const name of CHECK_EXAMPLES) {
+        const text = serializeCheckResult(JSON.parse(checkExample(name)));
+        assert.ok(text.endsWith("}\n") && !text.endsWith("\n\n"), name);
+        assert.ok(!text.includes("\t"), name);
+        assert.equal(text, `${JSON.stringify(JSON.parse(text), null, 2)}\n`, name);
+    }
+});
+
+test("an own rule's parameter and a result's actual keep their own keys, in a fixed order, and arrays keep theirs", () => {
+    const made = JSON.parse(checkExample("own-rule.json"));
+    const own = made.results.at(-1);
+    own.rule = { value: { z: [3, 1, 2], a: { y: 1, x: 2 } }, name: "own" };
+    own.actual = { b: 1, a: [{ d: 1, c: 2 }] };
+    const written = JSON.parse(serializeCheckResult(made)).results.at(-1);
+    assert.deepEqual(Object.keys(written.rule), ["name", "value"]);
+    assert.deepEqual(Object.keys(written.rule.value), ["a", "z"]);
+    assert.deepEqual(Object.keys(written.rule.value.a), ["x", "y"]);
+    assert.deepEqual(written.rule.value.z, [3, 1, 2]);
+    assert.deepEqual(Object.keys(written.actual), ["a", "b"]);
+    assert.deepEqual(Object.keys(written.actual.a[0]), ["c", "d"]);
+});
+
+test("a check result that contains itself throws a TypeError that says so, and anything but an object does too", () => {
+    const made = JSON.parse(checkExample("pass.json"));
+    made.results[0].rule.value = made;
+    assert.throws(() => serializeCheckResult(made), { name: "TypeError", message: "the check result contains itself" });
+
+    for (const value of [undefined, null, "{}", 1, [], true]) {
+        assert.throws(() => serializeCheckResult(/** @type {any} */ (value)), { name: "TypeError", message: "the check result must be an object" }, String(value));
+    }
+
+    // The observation serializer keeps its own words.
+    const observation = JSON.parse(example("file-single.json"));
+    observation.warnings.push(observation);
+    assert.throws(() => serializeObservation(observation), { name: "TypeError", message: "the observation contains itself" });
+    assert.throws(() => serializeObservation(/** @type {any} */ (null)), { name: "TypeError", message: "the observation must be an object" });
+});
+
+test("a check result repeating the same value is not one that contains itself", () => {
+    const made = JSON.parse(checkExample("pass.json"));
+    const shared = { z: 1 };
+    made.results[0].actual = shared;
+    made.results[0].expected = shared;
+    assert.deepEqual(JSON.parse(serializeCheckResult(made)).results[0].expected, { z: 1 });
+});
+
+test("the check result of the same checks serializes to the same bytes on every run, whatever the order it was assembled in", () => {
+    const first = CHECK_EXAMPLES.map((name) => serializeCheckResult(JSON.parse(checkExample(name))));
+    const second = CHECK_EXAMPLES.map((name) => serializeCheckResult(/** @type {any} */ (reversed(JSON.parse(checkExample(name))))));
+    assert.deepEqual(second, first);
 });

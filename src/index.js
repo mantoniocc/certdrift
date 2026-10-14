@@ -1,5 +1,6 @@
 export { inspect } from "./inspect.js";
-export { serializeObservation } from "./serialize.js";
+export { serializeObservation, serializeCheckResult } from "./serialize.js";
+export { policyProblems } from "./policy.js";
 export { ParseError, AmbiguousTargetError } from "./errors.js";
 export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 
@@ -10,7 +11,8 @@ export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 // from outside the package. Declared here, it writes `import("certdrift").Observation`. Only
 // the types a consumer needs to name are declared here: `DistinguishedName` and
 // `SubjectAltNames` are there because `subject`, `issuer` and `san` cannot be named without
-// them. The shapes of `key`, `derived` and `observation` are written inline by the compiler.
+// them, and `PolicyProblem` because `policyProblems()` returns a list of them. The shapes of
+// `key`, `derived` and `observation` are written inline by the compiler.
 // Adding a type here is additive for the people who use the package; removing or renaming one
 // is not.
 //
@@ -75,4 +77,56 @@ export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
  * @property {string[]} ip Canonical form, sorted.
  * @property {string[]} email Sorted.
  * @property {string[]} uri Sorted.
+ */
+
+/**
+ * What a policy requires, as described by `schema/policy.schema.json`: a contract number and one
+ * optional entry per kind of rule. An entry says how severe a failure is (`fail` unless it says
+ * `warn`) and, where the rule takes a parameter, the `value`. `validityStarted`,
+ * `validityNotEnded` and `matchesPrivateKey` take only a severity.
+ * @typedef {object} Policy
+ * @property {1} contract
+ * @property {{ severity?: "fail" | "warn" }} [validityStarted]
+ * @property {{ severity?: "fail" | "warn" }} [validityNotEnded]
+ * @property {{ value: string, severity?: "fail" | "warn" }} [expiresWithin] Days or hours: `30d`, `72h`.
+ * @property {{ value: number, severity?: "fail" | "warn" }} [maxLifetimeUsed] From 0 to 1.
+ * @property {{ value: string[], severity?: "fail" | "warn" }} [expectEku]
+ * @property {{ value: string[], severity?: "fail" | "warn" }} [ekuAllows]
+ * @property {{ value: string[], severity?: "fail" | "warn" }} [rejectEku]
+ * @property {{ value: string[], severity?: "fail" | "warn" }} [expectSan] DNS names and IP addresses.
+ * @property {{ value: string, severity?: "fail" | "warn" }} [expectFingerprint] SHA-256, 64 lowercase hexadecimal characters.
+ * @property {{ value: "end-entity", severity?: "fail" | "warn" }} [expectKind]
+ * @property {{ severity?: "fail" | "warn" }} [matchesPrivateKey]
+ */
+
+/**
+ * What one rule found. `code` is open: a rule of the consumer's own chooses its own. `status` is
+ * closed on purpose, because a consumer that does not know one cannot tell a pass from a failure.
+ * @typedef {object} Result
+ * @property {string} code
+ * @property {"pass" | "fail" | "warn"} status
+ * @property {{ name: string, value?: unknown } | null} rule `null` only for `POLICY_EMPTY`.
+ * @property {string} message
+ * @property {unknown} [actual]
+ * @property {unknown} [expected]
+ */
+
+/**
+ * The output of a check, as described by `schema/check-result.schema.json`.
+ * @typedef {object} CheckResult
+ * @property {1} contract
+ * @property {string} now The instant the rules were evaluated against.
+ * @property {{ status: "pass" | "fail" | "warn", pass: number, warn: number, fail: number }} summary
+ * @property {Result[]} results
+ * @property {Policy} policy
+ * @property {Observation} observation
+ */
+
+/**
+ * One thing wrong with a policy, as `policyProblems` lists it. The message never quotes a value of
+ * the policy other than a number in `contract`, because a policy may be shared and a value in the
+ * wrong place may be a secret.
+ * @typedef {object} PolicyProblem
+ * @property {string} path Where, as a JSON Pointer (RFC 6901): "" is the policy itself.
+ * @property {string} message What is wrong, in English.
  */

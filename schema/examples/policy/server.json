@@ -1,0 +1,21 @@
+{
+  "contract": 1,
+  "expiresWithin": {
+    "value": "30d"
+  },
+  "maxLifetimeUsed": {
+    "value": 0.66,
+    "severity": "warn"
+  },
+  "expectEku": {
+    "value": [
+      "serverAuth"
+    ]
+  },
+  "expectSan": {
+    "value": [
+      "api.example.com",
+      "192.0.2.10"
+    ]
+  }
+}
