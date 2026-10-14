@@ -113,6 +113,12 @@ const EXTENSIONS = {
     basicConstraintsCaTrailingBytes: "30110603551d130101ff040730030101ff0500",
     // The value is FORMAT:HEX,OCTETSTRING:30060201010101ff: the path length, then cA.
     basicConstraintsPathLengthFirst: "30120603551d130101ff040830060201010101ff",
+    // Critical, and its value is FORMAT:HEX,OCTETSTRING:0303070480: keyCertSign in the first octet, decipherOnly in the second, 7 unused bits.
+    keyUsageCertSignDecipherOnly: "300f0603551d0f0101ff04050303070480",
+    // The value is FORMAT:HEX,OCTETSTRING:3003010101: CA:TRUE with the BOOLEAN written as 01, where DER writes ff.
+    basicConstraintsCaTrueAsOne: "300f0603551d130101ff04053003010101",
+    // The value is FORMAT:HEX,OCTETSTRING:030202040500: keyCertSign, and then a NULL after the bit string.
+    keyUsageTrailingBytes: "30100603551d0f0101ff0406030202040500",
     // Critical, and its value is FORMAT:HEX,OCTETSTRING:03020804: a bit string with 8 unused bits.
     keyUsageUnusedBitsOutOfRange: "300e0603551d0f0101ff040403020804",
     // id = OID:extendedKeyUsage, value = OCTWRAP,SEQUENCE:ekuValue, with ekuValue: usage = OID:serverAuth
@@ -565,6 +571,45 @@ const KEY_USAGE_BEFORE_BASIC_CONSTRAINTS = [
     "lcJz8Gn6CvlMx96wr+/PrHw2Ppd2eWwpeBR+3maso/+vWlkyCczbIc7Xo+pwZmmZ",
     "/eV+4n/DwjTqRvFSoyMwITAOBgNVHQ8BAf8EBAMCAgQwDwYDVR0TAQH/BAUwAwEB",
     "/zAKBggqhkjOPQQDAgMJADAGAgEBAgEB",
+    "-----END CERTIFICATE-----",
+    "",
+].join("\n");
+
+// CN ku-two-octets. basicConstraints critical, CA:TRUE. Key Usage critical, keyCertSign in the first octet and decipherOnly in the second, with seven unused bits, which belong to the second octet only.
+const KEY_USAGE_TWO_OCTETS = [
+    "-----BEGIN CERTIFICATE-----",
+    "MIIBBzCB7aADAgECAgEFMAoGCCqGSM49BAMCMBgxFjAUBgNVBAMMDWt1LXR3by1v",
+    "Y3RldHMwIhgPMjAyNjAxMDEwMDAwMDBaGA8yMDM2MDEwMTAwMDAwMFowGDEWMBQG",
+    "A1UEAwwNa3UtdHdvLW9jdGV0czBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABI24",
+    "OVOVwnPwafoK+UzH3rCv78+sfDY+l3Z5bCl4FH7eZqyj/69aWTIJzNshztej6nBm",
+    "aZn95X7if8PCNOpG8VKjJDAiMA8GA1UdEwEB/wQFMAMBAf8wDwYDVR0PAQH/BAUD",
+    "AwcEgDAKBggqhkjOPQQDAgMJADAGAgEBAgEB",
+    "-----END CERTIFICATE-----",
+    "",
+].join("\n");
+
+// CN bc-true-one. basicConstraints critical whose cA BOOLEAN is 01, not ff.
+const BASIC_CONSTRAINTS_TRUE_AS_ONE = [
+    "-----BEGIN CERTIFICATE-----",
+    "MIHyMIHYoAMCAQICAQUwCgYIKoZIzj0EAwIwFjEUMBIGA1UEAwwLYmMtdHJ1ZS1v",
+    "bmUwIhgPMjAyNjAxMDEwMDAwMDBaGA8yMDM2MDEwMTAwMDAwMFowFjEUMBIGA1UE",
+    "AwwLYmMtdHJ1ZS1vbmUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASNuDlTlcJz",
+    "8Gn6CvlMx96wr+/PrHw2Ppd2eWwpeBR+3maso/+vWlkyCczbIc7Xo+pwZmmZ/eV+",
+    "4n/DwjTqRvFSoxMwETAPBgNVHRMBAf8EBTADAQEBMAoGCCqGSM49BAMCAwkAMAYC",
+    "AQECAQE=",
+    "-----END CERTIFICATE-----",
+    "",
+].join("\n");
+
+// CN ku-trailing. basicConstraints critical, CA:TRUE. Key Usage critical, keyCertSign, with two bytes (a NULL) after its bit string inside the extension value.
+const KEY_USAGE_TRAILING_BYTES = [
+    "-----BEGIN CERTIFICATE-----",
+    "MIIBBDCB6qADAgECAgEFMAoGCCqGSM49BAMCMBYxFDASBgNVBAMMC2t1LXRyYWls",
+    "aW5nMCIYDzIwMjYwMTAxMDAwMDAwWhgPMjAzNjAxMDEwMDAwMDBaMBYxFDASBgNV",
+    "BAMMC2t1LXRyYWlsaW5nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjbg5U5XC",
+    "c/Bp+gr5TMfesK/vz6x8Nj6XdnlsKXgUft5mrKP/r1pZMgnM2yHO16PqcGZpmf3l",
+    "fuJ/w8I06kbxUqMlMCMwDwYDVR0TAQH/BAUwAwEB/zAQBgNVHQ8BAf8EBgMCAgQF",
+    "ADAKBggqhkjOPQQDAgMJADAGAgEBAgEB",
     "-----END CERTIFICATE-----",
     "",
 ].join("\n");
@@ -1248,4 +1293,31 @@ test("an indefinite length is never read as an empty element: on the body of the
     for (const ca of [true, false]) {
         assert.equal(kindWarning(indefinite, ca, 0)?.message, "kind cannot be trusted: the certificate's extensions could not be read to check it");
     }
+});
+
+// Three answers of the reader that are right and could be broken without a test noticing.
+test("a Key Usage of two octets, with seven unused bits that belong to the last one, is read as it is: keyCertSign in the first octet is set", () => {
+    carries(KEY_USAGE_TWO_OCTETS, ["basicConstraintsCa", "keyUsageCertSignDecipherOnly"]);
+    assert.equal(new X509Certificate(KEY_USAGE_TWO_OCTETS).ca, true);
+    const observation = observe(KEY_USAGE_TWO_OCTETS);
+    assert.equal(observation.certificates[0].kind, "ca");
+    assert.deepEqual(observation.warnings, []);
+});
+
+test("a cA BOOLEAN written as 01 is true, as it is for Node.js: any non-zero octet is, and requiring ff would warn where both agree", () => {
+    carries(BASIC_CONSTRAINTS_TRUE_AS_ONE, ["basicConstraintsCaTrueAsOne"]);
+    assert.equal(new X509Certificate(BASIC_CONSTRAINTS_TRUE_AS_ONE).ca, true);
+    const observation = observe(BASIC_CONSTRAINTS_TRUE_AS_ONE);
+    assert.equal(observation.certificates[0].kind, "ca");
+    assert.deepEqual(observation.warnings, []);
+});
+
+test("bytes after the bit string inside the value of Key Usage do not decode, although Node.js reads a CA, as the same bytes do in basicConstraints", () => {
+    carries(KEY_USAGE_TRAILING_BYTES, ["basicConstraintsCa", "keyUsageTrailingBytes"]);
+    assert.equal(new X509Certificate(KEY_USAGE_TRAILING_BYTES).ca, true);
+    const observation = observe(KEY_USAGE_TRAILING_BYTES);
+    assert.equal(observation.certificates[0].kind, "ca");
+    assert.deepEqual(observation.warnings, [
+        { code: "KIND_UNRELIABLE", certificate: 0, message: "kind cannot be trusted: Key Usage does not decode" },
+    ]);
 });
