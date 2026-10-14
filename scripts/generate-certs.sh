@@ -292,6 +292,71 @@ make_cert selfsigned-leaf "/CN=selfsigned.example" self "$(leaf_ext "DNS:selfsig
 step "leaf EC P-256 in DER (the same certificate as leaf-p256.pem)"
 openssl x509 -in "$WORK/leaf-p256.pem" -outform DER -out "$WORK/leaf-p256.der"
 
+# --- Private keys in other forms ----------------------------------------------
+# The keys above are all unencrypted PKCS#8. These are the other forms a key file
+# comes in, and the files that look like one and cannot be read. Each is made from
+# a key of this run, so a readable one matches the certificate of its name.
+
+# The passphrase is fixed and public on purpose: it protects nothing, and a test
+# needs to know it. It is written to a file, and the keys are encrypted from that
+# file, so the two cannot disagree. The file ends in a line end, as a text file does.
+step "passphrase of the encrypted keys"
+PASSPHRASE_FILE="$WORK/test-only-passphrase.txt"
+printf '%s\n' "certdrift-public-test-passphrase" > "$PASSPHRASE_FILE"
+
+# 'openssl pkey' writes PKCS#8; -traditional asks for the older format of the
+# key's type: PKCS#1 for RSA ("RSA PRIVATE KEY") and SEC1 for EC ("EC PRIVATE KEY").
+# 'openssl rsa -aes256' without -traditional would write PKCS#8 again, so it is not used.
+step "RSA key in PKCS#1"
+openssl pkey -in "$WORK/leaf-rsa.key" -traditional -out "$WORK/leaf-rsa.pkcs1.key"
+
+step "EC key in SEC1"
+openssl pkey -in "$WORK/leaf-p256.key" -traditional -out "$WORK/leaf-p256.sec1.key"
+
+# The cipher is named so that the file does not change with OpenSSL's default.
+step "RSA and EC keys encrypted in PKCS#8"
+openssl pkey -in "$WORK/leaf-rsa.key" -aes-256-cbc -passout "file:$PASSPHRASE_FILE" \
+  -out "$WORK/leaf-rsa.pkcs8-encrypted.key"
+openssl pkey -in "$WORK/leaf-p256.key" -aes-256-cbc -passout "file:$PASSPHRASE_FILE" \
+  -out "$WORK/leaf-p256.pkcs8-encrypted.key"
+
+# The traditional format keeps the cipher in headers ("Proc-Type: 4,ENCRYPTED",
+# "DEK-Info") inside an "RSA PRIVATE KEY" block.
+step "RSA key encrypted in the traditional format"
+openssl pkey -in "$WORK/leaf-rsa.key" -traditional -aes-256-cbc -passout "file:$PASSPHRASE_FILE" \
+  -out "$WORK/leaf-rsa.pkcs1-encrypted.key"
+
+# Cut at half of the file's own size: what an interrupted copy leaves, without the
+# END line. A fixed byte count would copy the 241 bytes of a P-256 key whole, and
+# it would still load. dd, because POSIX has no 'head -c'.
+step "RSA key cut short"
+size="$(wc -c < "$WORK/leaf-rsa.key")"
+dd if="$WORK/leaf-rsa.key" of="$WORK/leaf-rsa.truncated.key" bs=1 count=$((size / 2)) 2>/dev/null
+
+# Well-formed PEM around text: the labels say it is a key and the body is not one.
+# A fixed sentence, so that the file has the same shape in every run.
+step "PRIVATE KEY block whose body is not a key"
+{
+  printf '%s\n' "-----BEGIN PRIVATE KEY-----"
+  printf '%s\n' "certdrift test material: this block holds text, not a key." | openssl base64
+  printf '%s\n' "-----END PRIVATE KEY-----"
+} > "$WORK/not-a-key.key"
+
+step "certificate where a key should be"
+cp "$WORK/leaf-rsa.pem" "$WORK/leaf-rsa.certificate.key"
+
+step "public key where a private key should be"
+openssl pkey -in "$WORK/leaf-rsa.key" -pubout -out "$WORK/leaf-rsa.public.key"
+
+step "empty file"
+: > "$WORK/empty.key"
+
+# Node.js reads the first key of a file and says nothing of the second. Both keys
+# are P-256 and each matches a different certificate, so the certificate the key
+# derived from the file matches is what shows which one was used.
+step "file with two private keys"
+cat "$WORK/leaf-p256.key" "$WORK/leaf-6-days.key" > "$WORK/two-keys.key"
+
 # --- Bundles ------------------------------------------------------------------
 # Built from certificates generated above, so this section goes last.
 
