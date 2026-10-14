@@ -1,5 +1,6 @@
 export { inspect } from "./inspect.js";
 export { serializeObservation, serializeCheckResult } from "./serialize.js";
+export { outsideValidity } from "./derived.js";
 export { policyProblems } from "./policy.js";
 export { ParseError, AmbiguousTargetError } from "./errors.js";
 export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";

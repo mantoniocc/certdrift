@@ -289,6 +289,29 @@ test("the installed library checks a policy and serializes a check result as the
     assert.equal(installed.text, readFileSync(new URL("schema/examples/check-result/fail-and-warn.json", root), "utf8"));
 });
 
+test("the installed library says whether a validity is current, has ended or has not started as the working copy does, and refuses what is not an instant", async () => {
+    const result = await runInConsumer("validity.mjs", `
+        import { outsideValidity } from "certdrift";
+        const answers = [
+            outsideValidity("2026-03-01T10:00:00Z", "2026-06-01T10:00:00Z", "2026-04-01T00:00:00Z"),
+            outsideValidity("2026-03-01T10:00:00Z", "2026-06-01T10:00:00Z", "2026-06-01T10:00:00Z"),
+            outsideValidity("2026-03-01T10:00:00Z", "2026-06-01T10:00:00Z", new Date("2026-06-01T10:00:01Z")),
+            outsideValidity("2026-03-01T10:00:00Z", "2026-06-01T10:00:00Z", "2026-02-01T00:00:00Z"),
+            outsideValidity("2030-01-01T00:00:00Z", "2020-01-01T00:00:00Z", "2025-01-01T00:00:00Z"),
+        ];
+        let refused = null;
+        try { outsideValidity("2026-03-01T10:00:00Z", "2026-06-01T10:00:00Z", "2026-02-30T00:00:00Z"); } catch (error) { refused = [error instanceof TypeError, error.message]; }
+        console.log(JSON.stringify({ answers, refused }));
+    `);
+    assert.equal(result.code, 0, shown(result));
+    const installed = JSON.parse(result.stdout);
+    const { outsideValidity } = await import("../src/index.js");
+    assert.deepEqual(installed.answers, [[], [], ["expired"], ["not yet valid"], ["not yet valid", "expired"]]);
+    assert.deepEqual(installed.answers[2], outsideValidity("2026-03-01T10:00:00Z", "2026-06-01T10:00:00Z", new Date("2026-06-01T10:00:01Z")));
+    assert.throws(() => outsideValidity("2026-03-01T10:00:00Z", "2026-06-01T10:00:00Z", "2026-02-30T00:00:00Z"), (error) => error instanceof TypeError && error.message === installed.refused[1]);
+    assert.equal(installed.refused[0], true);
+});
+
 test("the installed executable inspects a certificate, and --query finds the schema it carries", async () => {
     // Through the link npm creates in node_modules/.bin, run directly: that needs the shebang
     // and the permission bit, and it is how a consumer's scripts and `npx` start it.
@@ -528,6 +551,25 @@ test("Observation, CertificateObservation, Source and Warning import as types fr
         export const notSource: Source = 42;
         // @ts-expect-error: a warning code is text
         export const notWarning: Warning = { code: 1, certificate: null, message: "" };
+    `,
+    });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+});
+
+test("the declarations of outsideValidity take timestamps or Dates and return the two words and nothing else", async () => {
+    const result = await typeCheckInConsumer({
+        "validity.ts": `
+        import { outsideValidity } from "certdrift";
+        ${TYPE_HELPERS}
+
+        export const found = outsideValidity("2026-03-01T10:00:00Z", new Date(), new Date(0));
+        export type Answer = Expect<Equal<typeof found, ("not yet valid" | "expired")[]>>;
+        // A misspelled word is an error where a caller asks for one of the rules.
+        // @ts-expect-error: the words are "expired" and "not yet valid"
+        export const misspelled = found.includes("expire");
+        export const expired: boolean = found.includes("expired");
+        // @ts-expect-error: an instant is a timestamp or a Date, not a number
+        export const number = outsideValidity(0, 0, 0);
     `,
     });
     assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
