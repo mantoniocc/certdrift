@@ -103,7 +103,7 @@ A result holds:
 
 The code names the condition the result is about and the status says whether it holds, so a pass carries the code of the rule that passed. A rule that does not hold gives `fail`, or `warn` when its severity is `warn`. A result of a rule of your own has the same shape. Nothing in a result is a private key, a passphrase or anything read from them.
 
-The time rules use the certificate's original `notBefore` and `notAfter` and `now`, never the rounded values in `derived`. `now` is the observation's `at` unless another instant is given. A validity period includes both its ends: an instant equal to `notAfter` or to `notBefore` is still valid.
+The time rules use the certificate's original `notBefore` and `notAfter` and `now`, never the rounded values in `derived`. `now` is the observation's `at` unless another instant is given. A validity period includes both its ends: an instant equal to `notAfter` or to `notBefore` is still valid. The package exports this rule as `outsideValidity(notBefore, notAfter, now)`, which gives `[]`, `["not yet valid"]`, `["expired"]` or both (a period that ends before it starts), from the observation's timestamps or `Date`s. `inspect`'s readable output uses it to end the target's `remaining` line with `(expired)` or `(not yet valid)`; the other certificates of the chain are never labelled.
 
 ### Reason codes
 

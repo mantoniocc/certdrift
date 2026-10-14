@@ -6,6 +6,7 @@ import {
     ParseError,
     AmbiguousTargetError,
     EXTENDED_KEY_USAGE_OIDS,
+    outsideValidity,
 } from "../src/index.js";
 import { ConnectionError, HandshakeError, TimeoutError, fetchChain } from "../src/tls/index.js";
 import { PathSyntaxError, labelOf, parsePath, printable, undeclaredAt, valueAt } from "./query.js";
@@ -382,8 +383,9 @@ function reasonOf(error) {
  */
 
 /**
- * The readable text of an observation. Every value is the observation's own: nothing here is
- * computed about a certificate, and it says nothing about whether one is valid or expired.
+ * The readable text of an observation. Every value is the observation's own, and the only thing
+ * said about a certificate's validity is the label on the target's `remaining` line, which
+ * `outsideValidity` decides from the dates and the observation's instant.
  * @param {Observation} observation
  * @param {{ verbose: boolean, colour: boolean }} options
  */
@@ -392,14 +394,18 @@ export function present(observation, { verbose, colour }) {
     const paint = (format, text) => (colour ? styleText(format, text, { validateStream: false }) : text);
     const { certificates, target, warnings } = observation;
     const { at } = observation.observation;
-    const lines = [paint("bold", "Target"), ...block(certificates[target], verbose, at)];
+    // Only the target is labelled. A server often keeps sending a cross-signed root that expired
+    // years ago and clients ignore it, so a label on the rest of the chain would raise an alarm
+    // over something that is not wrong.
+    const { notBefore, notAfter } = certificates[target];
+    const lines = [paint("bold", "Target"), ...block(certificates[target], verbose, outsideValidity(notBefore, notAfter, at))];
 
     const others = certificates.filter((certificate) => certificate.index !== target);
     if (others.length > 0) {
         lines.push("", paint("bold", "Chain"));
         for (const certificate of others) {
-            if (verbose) lines.push(...block(certificate, true, at), "");
-            else lines.push(`  [${certificate.index}] ${certificate.kind}  ${nameOf(certificate.subject)}  ${relation(certificate)}  until ${certificate.notAfter}, ${timeRemaining(certificate, at)}  ${certificate.sha256}`);
+            if (verbose) lines.push(...block(certificate, true, []), "");
+            else lines.push(`  [${certificate.index}] ${certificate.kind}  ${nameOf(certificate.subject)}  ${relation(certificate)}  until ${certificate.notAfter}, ${timeRemaining(certificate)}  ${certificate.sha256}`);
         }
         if (verbose) lines.pop();
     }
@@ -417,9 +423,11 @@ export function present(observation, { verbose, colour }) {
  * The lines about one certificate.
  * @param {Certificate} certificate
  * @param {boolean} verbose
- * @param {string} at The observation's instant.
+ * @param {("not yet valid" | "expired")[]} outside What `outsideValidity` found for this
+ *   certificate, which the `remaining` line ends with, in parentheses, as plain text. The
+ *   chain's certificates are given none.
  */
-function block(certificate, verbose, at) {
+function block(certificate, verbose, outside) {
     const { key, san } = certificate;
     /** @type {[string, string[]][]} */
     const fields = [["certificate", [`[${certificate.index}] ${certificate.kind}  ${nameOf(certificate.subject)}`]]];
@@ -432,7 +440,7 @@ function block(certificate, verbose, at) {
     fields.push(["eku", [usages(certificate.eku, verbose)]]);
 
     fields.push(["validity", [`${certificate.notBefore} to ${certificate.notAfter}`]]);
-    fields.push(["remaining", [timeRemaining(certificate, at)]]);
+    fields.push(["remaining", [outside.length === 0 ? timeRemaining(certificate) : `${timeRemaining(certificate)} (${outside.join(", ")})`]]);
     fields.push(["key", [keyText(key)]]);
     fields.push(["issuer", [`${nameOf(certificate.issuer)}  ${relation(certificate)}`]]);
     if (verbose) fields.push(["issuer dn", [safe(certificate.issuer.dn)]]);
@@ -481,14 +489,13 @@ function usages(usages, verbose) {
  * The text that says how much of a certificate's validity is left, for the target and for every
  * line of the chain, so that its wording is the same wherever it appears.
  *
- * It takes the dates and the instant of the observation besides `derived`, although it reads
- * only `derived` today. Whether a validity has ended can be told only from the dates against the
- * instant: `daysRemaining` is rounded, so a certificate that expired an hour ago reads `0 days`,
- * the same as one that expires in an hour.
- * @param {Pick<Certificate, "notBefore" | "notAfter" | "derived">} validity
- * @param {string} at The observation's instant.
+ * It reads only `derived`, which is rounded: a certificate that expired an hour ago reads
+ * `0 days`, the same as one that expires in an hour. It therefore says nothing about whether the
+ * validity has ended. That is `outsideValidity`, from the dates, and its label is not added here
+ * because the lines of the chain use this text too and are never labelled.
+ * @param {Pick<Certificate, "derived">} validity
  */
-export function timeRemaining({ derived }, at) {
+export function timeRemaining({ derived }) {
     return `${days(derived.daysRemaining)}, ${fractionUsed(derived.lifetimeFraction)}`;
 }
 

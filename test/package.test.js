@@ -74,10 +74,10 @@ test("npm run check never reaches package:check, through another script or a pre
 // ---------------------------------------------------------------------------------------------
 // What the entry point exports
 
-test("the entry point exports at runtime exactly inspect, serializeObservation, serializeCheckResult, policyProblems, ParseError, AmbiguousTargetError and EXTENDED_KEY_USAGE_OIDS", () => {
+test("the entry point exports at runtime exactly inspect, serializeObservation, serializeCheckResult, outsideValidity, policyProblems, ParseError, AmbiguousTargetError and EXTENDED_KEY_USAGE_OIDS", () => {
     // Types leave no runtime export, so declaring or moving one cannot change this list. It is
     // written out so that adding or removing a name is an edit someone makes on purpose.
-    assert.deepEqual(Object.keys(library).sort(), ["AmbiguousTargetError", "EXTENDED_KEY_USAGE_OIDS", "ParseError", "inspect", "policyProblems", "serializeCheckResult", "serializeObservation"]);
+    assert.deepEqual(Object.keys(library).sort(), ["AmbiguousTargetError", "EXTENDED_KEY_USAGE_OIDS", "ParseError", "inspect", "outsideValidity", "policyProblems", "serializeCheckResult", "serializeObservation"]);
 });
 
 test("certdrift/tls exports at runtime exactly fetchChain, ConnectionError, HandshakeError and TimeoutError", () => {
