@@ -1,3 +1,5 @@
+import { ENTRIES } from "./policy.js";
+
 /**
  * How the keys of one kind of object are ordered, and the shape of what is inside it.
  * @typedef {object} Shape
@@ -40,6 +42,28 @@ const observation = {
     },
 };
 
+// The order of a check result puts the verdict first and the observation, which is most of the
+// bytes, last. The entries of the policy follow the order they are listed in everywhere else,
+// and the observation inside it uses the table above, not a copy of it.
+/** @type {Shape} */
+const checkResult = {
+    keys: ["contract", "now", "summary", "results", "policy", "observation"],
+    children: {
+        summary: { keys: ["status", "pass", "warn", "fail"] },
+        results: {
+            items: {
+                keys: ["code", "status", "rule", "message", "actual", "expected"],
+                children: { rule: { keys: ["name", "value"] } },
+            },
+        },
+        policy: {
+            keys: ["contract", ...ENTRIES.map(([entry]) => entry)],
+            children: Object.fromEntries(ENTRIES.map(([entry]) => [entry, { keys: ["value", "severity"] }])),
+        },
+        observation,
+    },
+};
+
 /**
  * An observation as the bytes to save, print or compare: the same observation always gives the
  * same text, whatever order the caller built its objects in.
@@ -59,7 +83,25 @@ export function serializeObservation(value) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
         throw new TypeError("the observation must be an object");
     }
-    return `${JSON.stringify(arrange(value, observation, "", new Set()), null, 2)}\n`;
+    return `${JSON.stringify(arrange(value, observation, "", new Set(), "observation"), null, 2)}\n`;
+}
+
+/**
+ * A check result as the bytes to save, print or compare, written the way `serializeObservation`
+ * writes an observation: two-space indentation, one newline at the end, the keys of the contract
+ * in a fixed order, any other key after them and sorted, arrays in the order they have. The
+ * observation inside it is written in the observation's own order. The same check result always
+ * gives the same text, whatever order its objects were built in.
+ *
+ * @param {import("./index.js").CheckResult} value
+ * @returns {string}
+ * @throws {TypeError} The argument is not an object, or it contains itself.
+ */
+export function serializeCheckResult(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new TypeError("the check result must be an object");
+    }
+    return `${JSON.stringify(arrange(value, checkResult, "", new Set(), "check result"), null, 2)}\n`;
 }
 
 /**
@@ -76,21 +118,22 @@ export function serializeObservation(value) {
  * @param {Shape | undefined} shape
  * @param {string} key The key the value is under, which `toJSON` receives.
  * @param {Set<object>} ancestors The objects being copied, to find a value that contains itself.
+ * @param {string} noun What is being written, for the message about a value that contains itself.
  * @returns {unknown}
  * @throws {TypeError}
  */
-function arrange(value, shape, key, ancestors) {
+function arrange(value, shape, key, ancestors, noun) {
     const toJSON = typeof value === "object" && value !== null ? /** @type {{ toJSON?: unknown }} */ (value).toJSON : undefined;
     const plain = typeof toJSON === "function" ? toJSON.call(value, key) : value;
     if (typeof plain !== "object" || plain === null) return plain;
 
     // Without this, the stack would overflow before JSON.stringify could notice, as it only ever
     // sees the copy.
-    if (ancestors.has(plain)) throw new TypeError("the observation contains itself");
+    if (ancestors.has(plain)) throw new TypeError(`the ${noun} contains itself`);
     ancestors.add(plain);
     try {
         if (Array.isArray(plain)) {
-            return plain.map((item, index) => arrange(item, shape?.items, String(index), ancestors));
+            return plain.map((item, index) => arrange(item, shape?.items, String(index), ancestors, noun));
         }
         const present = Object.keys(plain);
         const named = (shape?.keys ?? []).filter((known) => present.includes(known));
@@ -98,7 +141,7 @@ function arrange(value, shape, key, ancestors) {
         return Object.fromEntries(
             [...named, ...others].map((own) => [
                 own,
-                arrange(/** @type {Record<string, unknown>} */ (plain)[own], shape?.children?.[own], own, ancestors),
+                arrange(/** @type {Record<string, unknown>} */ (plain)[own], shape?.children?.[own], own, ancestors, noun),
             ]),
         );
     } finally {

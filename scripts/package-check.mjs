@@ -264,6 +264,31 @@ test("the library imports from the installed package and inspects a certificate 
     assert.deepEqual(installed.observation, JSON.parse(serializeObservation(reference)));
 });
 
+test("the installed library checks a policy and serializes a check result as the working copy does", async () => {
+    const examples = "schema/examples";
+    const result = await runInConsumer("policy.mjs", `
+        import { readFileSync } from "node:fs";
+        import { policyProblems, serializeCheckResult } from "certdrift";
+        const policy = JSON.parse(readFileSync(process.argv[2], "utf8"));
+        const checked = JSON.parse(readFileSync(process.argv[3], "utf8"));
+        console.log(JSON.stringify({
+            valid: policyProblems(policy),
+            invalid: policyProblems({ contract: 2, expiresWithin: { value: "30" }, rule: undefined }),
+            text: serializeCheckResult(checked),
+        }));
+    `, [
+        join(repository, examples, "policy", "every-rule.json"),
+        join(repository, examples, "check-result", "fail-and-warn.json"),
+    ]);
+    assert.equal(result.code, 0, shown(result));
+    const installed = JSON.parse(result.stdout);
+    const working = await import("../src/index.js");
+    assert.deepEqual(installed.valid, []);
+    assert.deepEqual(installed.invalid, working.policyProblems({ contract: 2, expiresWithin: { value: "30" }, rule: undefined }));
+    assert.ok(installed.invalid.length >= 3, JSON.stringify(installed.invalid));
+    assert.equal(installed.text, readFileSync(new URL("schema/examples/check-result/fail-and-warn.json", root), "utf8"));
+});
+
 test("the installed executable inspects a certificate, and --query finds the schema it carries", async () => {
     // Through the link npm creates in node_modules/.bin, run directly: that needs the shebang
     // and the permission bit, and it is how a consumer's scripts and `npx` start it.
@@ -575,6 +600,89 @@ test("a consumer that emits declarations names every type it infers from inspect
     assert.doesNotMatch(declarations, /certdrift\/types|certdrift\/src/, "the declarations point into the package's files");
 });
 
+test("Policy, Result, CheckResult and PolicyProblem import as types from the installed package and fit the functions that take and return them", async () => {
+    const result = await typeCheckInConsumer({
+        "policy.ts": `
+        import type { Observation, Policy, Result, CheckResult, PolicyProblem } from "certdrift";
+        import { inspect, policyProblems, serializeCheckResult } from "certdrift";
+        ${TYPE_HELPERS}
+
+        export type Checks = [
+            Expect<Equal<Parameters<typeof serializeCheckResult>[0], CheckResult>>,
+            Expect<Equal<ReturnType<typeof policyProblems>, PolicyProblem[]>>,
+            Expect<Equal<CheckResult["results"][number], Result>>,
+            Expect<Equal<CheckResult["policy"], Policy>>,
+            Expect<Equal<CheckResult["observation"], Observation>>,
+            // The status is closed on purpose, and the code is open.
+            Expect<Equal<Result["status"], "pass" | "fail" | "warn">>,
+            Expect<Equal<Result["code"], string>>,
+            Expect<Equal<CheckResult["summary"]["status"], "pass" | "fail" | "warn">>,
+            // None of them is \`any\`, which would be equal to a type that is \`any\` too.
+            Expect<Equal<Equal<Policy, any>, false>>,
+            Expect<Equal<Equal<Result, any>, false>>,
+            Expect<Equal<Equal<CheckResult, any>, false>>,
+            Expect<Equal<Equal<PolicyProblem, any>, false>>,
+        ];
+
+        export const policy: Policy = {
+            contract: 1,
+            expiresWithin: { value: "30d", severity: "warn" },
+            maxLifetimeUsed: { value: 0.66 },
+            expectEku: { value: ["serverAuth"] },
+            validityNotEnded: { severity: "warn" },
+            matchesPrivateKey: {},
+        };
+        export const problems: PolicyProblem[] = policyProblems(policy);
+        export const own: Result = { code: "ISSUER_NOT_ALLOWED", status: "fail", rule: { name: "issuerAllowed", value: ["Other CA"] }, message: "m", actual: null };
+        export const empty: Result = { code: "POLICY_EMPTY", status: "warn", rule: null, message: "m" };
+        export const made: CheckResult = {
+            contract: 1,
+            now: "2026-09-15T14:02:11Z",
+            summary: { status: "warn", pass: 0, warn: 1, fail: 0 },
+            results: [empty],
+            policy,
+            observation: inspect(new Uint8Array()),
+        };
+        export const text: string = serializeCheckResult(made);
+
+        // Each of these fails as an unused directive if its type collapses to \`any\`.
+        // @ts-expect-error: a status is one of three words
+        export const notStatus: Result = { code: "X", status: "skipped", rule: null, message: "m" };
+        // @ts-expect-error: the contract number is 1
+        export const notPolicy: Policy = { contract: 2 };
+        // @ts-expect-error: a severity is fail or warn
+        export const notSeverity: Policy = { contract: 1, validityStarted: { severity: "loud" } };
+        // @ts-expect-error: a duration is text
+        export const notDuration: Policy = { contract: 1, expiresWithin: { value: 30 } };
+        // @ts-expect-error: a problem has a path
+        export const notProblem: PolicyProblem = { message: "m" };
+    `,
+    });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+});
+
+test("a consumer that emits declarations names what it infers from policyProblems and serializeCheckResult through certdrift", async () => {
+    // A type that is only an alias of one declared in another file cannot be written into the
+    // consumer's declarations (TS2883).
+    const result = await typeCheckInConsumer({
+        "emit.ts": `
+        import { inspect, policyProblems, serializeCheckResult } from "certdrift";
+        import type { CheckResult } from "certdrift";
+        export const problems = policyProblems({ contract: 1 });
+        export const first = policyProblems({})[0];
+        export const check = (made: CheckResult) => ({ text: serializeCheckResult(made), results: made.results, policy: made.policy, summary: made.summary, rule: made.results[0]?.rule });
+        export const observed = inspect(new Uint8Array());
+    `,
+    }, { noEmit: false, declaration: true, emitDeclarationOnly: true, outDir: "out" });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+
+    const declarations = readFileSync(join(result.directory, "out", "emit.d.ts"), "utf8");
+    for (const name of ["PolicyProblem", "Result", "Policy"]) {
+        assert.match(declarations, new RegExp(`import\\("certdrift"\\)\\.${name}\\b`), `${name} is not named through certdrift`);
+    }
+    assert.doesNotMatch(declarations, /certdrift\/types|certdrift\/src/, "the declarations point into the package's files");
+});
+
 // ---------------------------------------------------------------------------------------------
 // The types of the TLS entry point
 
@@ -674,6 +782,8 @@ test("the types import from JavaScript through JSDoc and under the strictest com
 
 test("each exported type has the schema's property names and required ones, and accepts any string where the schema leaves a value open", async () => {
     const schema = JSON.parse(readFileSync(join(setup.installed, "schema", "observation.schema.json"), "utf8"));
+    const policy = JSON.parse(readFileSync(join(setup.installed, "schema", "policy.schema.json"), "utf8"));
+    const checkResult = JSON.parse(readFileSync(join(setup.installed, "schema", "check-result.schema.json"), "utf8"));
     /** @type {[string, { properties: Record<string, unknown>, required: string[] }][]} */
     const table = [
         ["Observation", schema],
@@ -685,6 +795,10 @@ test("each exported type has the schema's property names and required ones, and 
         ['CertificateObservation["key"]', schema.$defs.key],
         ['CertificateObservation["derived"]', schema.$defs.derived],
         ["Warning", schema.$defs.warning],
+        ["Policy", policy],
+        ["CheckResult", checkResult],
+        ["Result", checkResult.$defs.result],
+        ['CheckResult["summary"]', checkResult.properties.summary],
     ];
     /** @param {string[]} names */
     const union = (names) => (names.length === 0 ? "never" : names.map((name) => JSON.stringify(name)).join(" | "));
@@ -695,7 +809,7 @@ test("each exported type has the schema's property names and required ones, and 
 
     const result = await typeCheckInConsumer({
         "schema.ts": `
-        import type { Observation, CertificateObservation, Source, Warning, DistinguishedName, SubjectAltNames } from "certdrift";
+        import type { Observation, CertificateObservation, Source, Warning, DistinguishedName, SubjectAltNames, Policy, CheckResult, Result } from "certdrift";
         ${TYPE_HELPERS}
         type RequiredKeys<T> = { [K in keyof T]-?: {} extends Pick<T, K> ? never : K }[keyof T];
 
@@ -710,7 +824,8 @@ test("each exported type has the schema's property names and required ones, and 
         export const certificateKind: CertificateObservation["kind"] = anything;
         export const warningCode: Warning["code"] = anything;
         export const keyAlgorithm: CertificateObservation["key"]["algorithm"] = anything;
-        export type Unused = [Observation, DistinguishedName, SubjectAltNames];
+        export const resultCode: Result["code"] = anything;
+        export type Unused = [Observation, DistinguishedName, SubjectAltNames, Policy, CheckResult];
     `,
     });
     assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));

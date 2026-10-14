@@ -1,0 +1,10 @@
+{
+  "contract": 1,
+  "expectFingerprint": {
+    "value": "872a229969048f8dffb599a463b6438a35aa16c6eba1922db552e8560bccd508"
+  },
+  "expectKind": {
+    "value": "end-entity"
+  },
+  "matchesPrivateKey": {}
+}

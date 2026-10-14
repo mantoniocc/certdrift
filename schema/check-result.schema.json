@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/mantoniocc/certdrift/main/schema/check-result.schema.json",
+  "title": "certdrift check result",
+  "description": "What a check found: the instant the rules were evaluated against, a summary, one result per rule, the policy that was applied and the observation that was checked. Contract version 1. Consumers must tolerate properties and enum-like values they do not know, except status, which is closed on purpose (see its description).",
+  "type": "object",
+  "required": ["contract", "now", "summary", "results", "policy", "observation"],
+  "properties": {
+    "contract": {
+      "description": "Contract version of the check result, independent of the observation's own contract number and of the policy's. Adding fields or codes keeps 1; renaming, removing or repurposing a field, or changing what a code means, requires 2.",
+      "const": 1
+    },
+    "now": {
+      "description": "The instant the rules were evaluated against. It is the observation's at unless another instant was asked for; the observation's at is never changed. The time rules (EXPIRED, NOT_YET_VALID, EXPIRES_SOON, LIFETIME_USED_EXCEEDED) are defined on the certificate's original notBefore and notAfter and this instant, never on the rounded values in derived.",
+      "$ref": "observation.schema.json#/$defs/timestamp"
+    },
+    "summary": {
+      "description": "The verdict. status is fail when any result has status fail, otherwise warn when any has status warn, otherwise pass. pass, warn and fail count the results by status. A rule with severity warn never makes a check fail.",
+      "type": "object",
+      "required": ["status", "pass", "warn", "fail"],
+      "properties": {
+        "status": { "$ref": "#/$defs/status" },
+        "pass": { "type": "integer", "minimum": 0 },
+        "warn": { "type": "integer", "minimum": 0 },
+        "fail": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "results": {
+      "description": "One result per rule that was evaluated, in a fixed order so that equal checks give equal output: validityStarted, validityNotEnded, expiresWithin, maxLifetimeUsed, expectEku, ekuAllows, rejectEku, expectSan, expectFingerprint, expectKind, matchesPrivateKey (those the policy lists, and the first two always), then the rules of the consumer's own in the order they were given, then POLICY_EMPTY, which exists only when there is nothing else to apply. A result of an own rule has the same shape as any other. Own rules are code passed to the function that evaluates, not entries of the policy, so a policy stays a portable JSON document.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/result" }
+    },
+    "policy": {
+      "description": "The policy that was applied: its contract and the entries this version knows, each with its severity written out, the two validity entries included, so that what was applied can be read without knowing the defaults. A property of the policy this version does not know is not repeated here, so a result never echoes something that was put in the wrong place.",
+      "$ref": "policy.schema.json",
+      "type": "object",
+      "required": ["validityStarted", "validityNotEnded"],
+      "properties": {
+        "validityStarted": { "$ref": "#/$defs/appliedEntry" },
+        "validityNotEnded": { "$ref": "#/$defs/appliedEntry" },
+        "expiresWithin": { "$ref": "#/$defs/appliedEntry" },
+        "maxLifetimeUsed": { "$ref": "#/$defs/appliedEntry" },
+        "expectEku": { "$ref": "#/$defs/appliedEntry" },
+        "ekuAllows": { "$ref": "#/$defs/appliedEntry" },
+        "rejectEku": { "$ref": "#/$defs/appliedEntry" },
+        "expectSan": { "$ref": "#/$defs/appliedEntry" },
+        "expectFingerprint": { "$ref": "#/$defs/appliedEntry" },
+        "expectKind": { "$ref": "#/$defs/appliedEntry" },
+        "matchesPrivateKey": { "$ref": "#/$defs/appliedEntry" }
+      }
+    },
+    "observation": {
+      "description": "The observation that was checked, as it was: validated by the observation schema's own definition, with its own contract number.",
+      "$ref": "observation.schema.json"
+    }
+  },
+  "$defs": {
+    "status": {
+      "description": "pass: the rule holds. fail: it does not hold and its severity is fail. warn: it does not hold and its severity is warn. Closed on purpose, unlike the open values of the observation: a consumer that does not know a status cannot tell a pass from a failure, so a new status needs a new contract number.",
+      "enum": ["pass", "fail", "warn"]
+    },
+    "appliedEntry": {
+      "description": "An entry of the applied policy: its severity is always written.",
+      "type": "object",
+      "required": ["severity"],
+      "properties": {
+        "severity": { "$ref": "policy.schema.json#/$defs/severity" }
+      }
+    },
+    "result": {
+      "description": "What one rule found. The code names the condition the result is about, and the status says whether it was found to hold, so a pass carries the code of the rule that passed.",
+      "type": "object",
+      "required": ["code", "status", "rule", "message"],
+      "properties": {
+        "code": {
+          "description": "Stable code for programs: capital letters, digits and underscores, starting with a letter. Known values: EKU_MISSING, EKU_NOT_PERMITTED, EKU_FORBIDDEN, SAN_MISSING, FINGERPRINT_MISMATCH, EXPIRED, NOT_YET_VALID, EXPIRES_SOON, LIFETIME_USED_EXCEEDED, KEY_MISMATCH, KEY_UNREADABLE, TARGET_NOT_END_ENTITY, POLICY_EMPTY. A rule of the consumer's own chooses its own. Tolerate unknown values. Codes are versioned with the contract: adding one is additive, and changing what one means requires a new contract number.",
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "status": { "$ref": "#/$defs/status" },
+        "rule": {
+          "description": "The rule that produced the result: its name and the parameter it was given. For a rule of the policy, the name is the name of the entry and the value is the entry's value as written; an entry with no value has no value here. For an own rule, the name and the parameter are the consumer's. null only for POLICY_EMPTY, which no single rule produces.",
+          "type": ["object", "null"],
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "value": { "description": "The parameter, any JSON value." }
+          }
+        },
+        "message": {
+          "description": "Human-readable English text. Never parse it; decide with code. It never holds a private key, a passphrase or anything read from them.",
+          "type": "string"
+        },
+        "actual": {
+          "description": "What was found, as JSON, where the rule compares something. Absent when there is nothing to show; null is a value, as in eku: null. It never holds a private key, a passphrase or anything read from them. What each code puts here is in the README."
+        },
+        "expected": {
+          "description": "What was required, as JSON, where the rule compares something. Absent when there is nothing to show. It never holds a private key, a passphrase or anything read from them. What each code puts here is in the README."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "code": { "const": "POLICY_EMPTY" } }, "required": ["code"] },
+          "then": { "properties": { "rule": { "type": "null" }, "status": { "const": "warn" } } }
+        },
+        {
+          "if": { "properties": { "rule": { "type": "null" } }, "required": ["rule"] },
+          "then": { "properties": { "code": { "const": "POLICY_EMPTY" } } }
+        }
+      ]
+    }
+  }
+}

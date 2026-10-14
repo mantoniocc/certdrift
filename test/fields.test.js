@@ -172,6 +172,45 @@ const TWO_EKU_EXTENSIONS = [
     "",
 ].join("\n");
 
+// CN empty. An Extended Key Usage extension that is present and lists nothing: its value is an
+// empty SEQUENCE. Made like TWO_EKU_EXTENSIONS, a P-256 public key, a dummy signature and these
+// validity dates, with the extensions section
+//     exts = EXPLICIT:3,SEQUENCE:extensions
+//     [extensions]
+//     first = SEQUENCE:first
+//     [first]
+//     id = OID:extendedKeyUsage
+//     value = OCTWRAP,SEQUENCE:none
+//     [none]
+// Node.js shows an empty list of usages, which is not what it shows for an absent extension.
+const EMPTY_EKU_EXTENSION = [
+    "-----BEGIN CERTIFICATE-----",
+    "MIHgMIHGoAMCAQICAQUwCgYIKoZIzj0EAwIwEDEOMAwGA1UEAwwFZW1wdHkwIhgP",
+    "MjAyNjAxMDEwMDAwMDBaGA8yMDM2MDEwMTAwMDAwMFowEDEOMAwGA1UEAwwFZW1w",
+    "dHkwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQQiZ7oZMRUj6A7SB6Ta1KrK9hH",
+    "+IyfBmhks4yd09UTb1BumVKCLa1+FZ1/DpZ3dfp2+olhO9P71WvGLZK7jvzDow0w",
+    "CzAJBgNVHSUEAjAAMAoGCCqGSM49BAMCAwkAMAYCAQECAQE=",
+    "-----END CERTIFICATE-----",
+    "",
+].join("\n");
+
+// CN undecodable. An Extended Key Usage extension whose value is an INTEGER where a SEQUENCE of
+// usages belongs. Made like EMPTY_EKU_EXTENSION, with
+//     [first]
+//     id = OID:extendedKeyUsage
+//     value = OCTWRAP,INTEGER:1
+// Node.js gives `undefined` for it, the same as for an absent extension.
+const UNDECODABLE_EKU_EXTENSION = [
+    "-----BEGIN CERTIFICATE-----",
+    "MIHtMIHToAMCAQICAQUwCgYIKoZIzj0EAwIwFjEUMBIGA1UEAwwLdW5kZWNvZGFi",
+    "bGUwIhgPMjAyNjAxMDEwMDAwMDBaGA8yMDM2MDEwMTAwMDAwMFowFjEUMBIGA1UE",
+    "AwwLdW5kZWNvZGFibGUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQQiZ7oZMRU",
+    "j6A7SB6Ta1KrK9hH+IyfBmhks4yd09UTb1BumVKCLa1+FZ1/DpZ3dfp2+olhO9P7",
+    "1WvGLZK7jvzDow4wDDAKBgNVHSUEAwIBATAKBggqhkjOPQQDAgMJADAGAgEBAgEB",
+    "-----END CERTIFICATE-----",
+    "",
+].join("\n");
+
 test("derived.daysRemaining is (notAfter - at) in days with one decimal, negative once expired: leaf-expired.pem", async (t) => {
     const { notAfter } = EXPIRED;
 
@@ -534,6 +573,25 @@ test("eku maps known OIDs to names, leaves the OID as text otherwise, is sorted,
         const certificate = inspect(TWO_EKU_EXTENSIONS, { at: AT }).certificates[0];
         assert.equal(new X509Certificate(TWO_EKU_EXTENSIONS).keyUsage, undefined);
         assert.equal(certificate.eku, null);
+    });
+
+    // The rules about Extended Key Usage tell the two apart: `[]` is an extension that permits
+    // nothing, and `null` is no extension, which restricts nothing.
+    await t.test("an extension that lists nothing is an empty list in a real certificate, and the observation validates", () => {
+        assert.deepEqual(new X509Certificate(EMPTY_EKU_EXTENSION).keyUsage, []);
+        const observation = inspect(EMPTY_EKU_EXTENSION, { at: AT });
+        assert.deepEqual(observation.certificates[0].eku, []);
+        assert.deepEqual(observation.warnings, []);
+        assert.deepEqual(errorsOf(observation), []);
+    });
+
+    // Today's behaviour, not the rule: an extension Node.js cannot decode reads as an absent one,
+    // with no warning, so a rule that treats an absent extension as "no restriction" passes it.
+    await t.test("today an Extended Key Usage extension that does not decode reads as null with no warning", () => {
+        assert.equal(new X509Certificate(UNDECODABLE_EKU_EXTENSION).keyUsage, undefined);
+        const observation = inspect(UNDECODABLE_EKU_EXTENSION, { at: AT });
+        assert.equal(observation.certificates[0].eku, null);
+        assert.deepEqual(observation.warnings, []);
     });
 });
 
