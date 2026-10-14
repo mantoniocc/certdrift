@@ -8,8 +8,9 @@ import {
     EXTENDED_KEY_USAGE_OIDS,
     outsideValidity,
 } from "../src/index.js";
-import { ConnectionError, HandshakeError, TimeoutError, fetchChain } from "../src/tls/index.js";
+import { HOST_OPTIONS, fetchHost, hostRequestOf, refusalOf } from "./host.js";
 import { PathSyntaxError, labelOf, parsePath, printable, undeclaredAt, valueAt } from "./query.js";
+import { safe } from "./safe.js";
 
 /** @import { Source } from "../src/index.js" */
 
@@ -26,10 +27,8 @@ export const INSPECT_OPTIONS = /** @type {const} */ ({
     select: { type: "string", multiple: true },
     // A list for the same reason as `select`.
     query: { type: "string", multiple: true },
-    // The three below are lists for the same reason as `select`.
-    host: { type: "string", multiple: true },
-    servername: { type: "string", multiple: true },
-    timeout: { type: "string", multiple: true },
+    // --host, --servername and --timeout, defined once for every command that takes a host.
+    ...HOST_OPTIONS,
     help: { type: "boolean", short: "h" },
 });
 
@@ -179,21 +178,10 @@ export async function main(argv, { env, stdin, stdout, stderr }) {
         out(HELP);
         return 0;
     }
-    for (const name of /** @type {const} */ (["host", "servername", "timeout"])) {
-        if ((values[name]?.length ?? 0) > 1) return misuse(`--${name} was given more than once`);
-    }
-    const host = values.host?.[0];
-    const servername = values.servername?.[0];
-    const timeout = values.timeout?.[0];
-    if (host !== undefined) {
-        // A path is always a file and the host is always given with --host, so a command line that
-        // holds both has no single meaning, and neither is guessed from a colon or from whether a
-        // file of that name exists.
-        if (positionals.length > 0) return misuse('--host takes no path and no "-": it reads what a server sends, not a file or standard input');
-        if (timeout !== undefined && !/^[1-9][0-9]*$/.test(timeout)) return misuse(`--timeout needs a positive whole number of milliseconds, and got ${JSON.stringify(timeout)}`);
-    } else {
-        if (servername !== undefined) return misuse("--servername is sent to a host, so it needs --host");
-        if (timeout !== undefined) return misuse("--timeout is the wait for a host, so it needs --host");
+    const asked = hostRequestOf(values, { pathGiven: positionals.length > 0 });
+    if ("misuse" in asked) return misuse(asked.misuse);
+    const { request } = asked;
+    if (request === undefined) {
         if (positionals.length === 0) return misuse('no path given; use "-" to read standard input, or --host to inspect a server');
         if (positionals.length > 1) return misuse(`expected one path, got ${positionals.length}`);
     }
@@ -230,33 +218,17 @@ export async function main(argv, { env, stdin, stdout, stderr }) {
     let source;
     /** What the messages call the material. */
     let described;
-    if (host !== undefined) {
-        const options = {
-            ...(servername === undefined ? {} : { servername }),
-            ...(timeout === undefined ? {} : { timeoutMs: Number(timeout) }),
-        };
-
-        // `fetchChain` refuses an argument it cannot use with a `TypeError` before it opens a socket,
-        // and it does so before it looks at the signal. Asking with a signal that is already aborted
-        // therefore tells a refused argument (misuse) from everything else without connecting,
-        // and without taking every `TypeError` for misuse: the one raised while connecting is a bug.
-        const accepted = new Error("the arguments were accepted");
-        try {
-            await fetchChain(host, { ...options, signal: AbortSignal.abort(accepted) });
-        } catch (error) {
-            if (error instanceof TypeError) return misuse(error.message);
-            if (error !== accepted) throw error;
+    if (request !== undefined) {
+        // The TLS module's check of the arguments comes after every check the command makes itself.
+        const refused = await refusalOf(request);
+        if (refused !== undefined) return misuse(refused);
+        const fetched = await fetchHost(request);
+        if (!("chain" in fetched)) {
+            err(fetched.message);
+            return fetched.code;
         }
-
-        try {
-            ({ bytes: material, source } = await fetchChain(host, options));
-        } catch (error) {
-            const failure = hostFailure(error);
-            if (failure === undefined) throw error;
-            err(`certdrift: ${safe(host)}: ${failure}\n`);
-            return 3;
-        }
-        described = source.ref ?? host;
+        ({ bytes: material, source } = fetched.chain);
+        described = source.ref ?? request.target;
     } else {
         const [path] = positionals;
         source = path === "-" ? { kind: "stdin", ref: "-" } : { kind: "file", ref: path };
@@ -323,58 +295,12 @@ async function readAll(stream) {
 }
 
 /**
- * What a certificate puts in a name can be anything, and a terminal obeys control characters:
- * an escape sequence could retitle the window or repaint the screen, and a right-to-left mark
- * could reverse what comes after it. Control, format, line and paragraph separators and lone
- * surrogates are shown as `\u{XX}` so the person sees what the certificate holds.
- * @param {string} text
- */
-function safe(text) {
-    return text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/gu, (character) => `\\u{${/** @type {number} */ (character.codePointAt(0)).toString(16).toUpperCase()}}`);
-}
-
-/**
  * A message that is itself several lines, as the list of candidates is: the line breaks are the
  * library's own and stay, and what is inside each line is escaped.
  * @param {string} text
  */
 function perLine(text) {
     return text.split("\n").map(safe).join("\n");
-}
-
-/**
- * What a failure to get the certificates of a host says, or `undefined` when the error is none of
- * the three the module raises for that: any other error is not this command's to explain.
- *
- * The module's `ConnectionError` covers a host that cannot be reached and one that refuses the
- * connection, which a person fixes differently, so the original error's code tells them apart.
- * Every part of the text comes from the error, and the host's own text can be in it, so it is shown
- * escaped.
- * @param {unknown} error
- * @returns {string | undefined}
- */
-export function hostFailure(error) {
-    if (error instanceof TimeoutError) return `did not answer in time: ${safe(error.message)}`;
-    if (error instanceof HandshakeError) return `the TLS handshake failed (the host may not speak TLS): ${safe(reasonOf(error))}`;
-    if (error instanceof ConnectionError) {
-        const code = error.cause instanceof Error && "code" in error.cause ? error.cause.code : undefined;
-        const refused = code === "ECONNREFUSED" || code === "ECONNRESET";
-        return `${refused ? "connection refused" : "cannot be reached"}: ${safe(reasonOf(error))}`;
-    }
-    return undefined;
-}
-
-/**
- * The reason inside a module error: what Node.js or OpenSSL said, which is more to the point than
- * the module's sentence around it, and that sentence when there is nothing underneath. OpenSSL's
- * `reason` is the part of its report a reader needs.
- * @param {Error} error
- */
-function reasonOf(error) {
-    const { cause } = error;
-    if (!(cause instanceof Error)) return error.message;
-    const reason = /** @type {{ reason?: unknown }} */ (cause).reason;
-    return typeof reason === "string" ? reason : cause.message.split("\n")[0];
 }
 
 /**

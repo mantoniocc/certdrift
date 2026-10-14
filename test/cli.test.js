@@ -9,7 +9,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { inspect, serializeObservation, AmbiguousTargetError } from "../src/index.js";
 import { derivedOf } from "../src/derived.js";
 import { ConnectionError, HandshakeError, TimeoutError, fetchChain } from "../src/tls/index.js";
-import { INSPECT_OPTIONS, hostFailure, present, timeRemaining } from "../bin/cli.js";
+import { INSPECT_OPTIONS, present, timeRemaining } from "../bin/cli.js";
+import { hostFailure } from "../bin/host.js";
 import { validatorFor } from "./helpers/schema.js";
 import { closedPort, serveChain, serveSilent, serveWith } from "./helpers/tls.js";
 
@@ -2188,4 +2189,44 @@ test("a TypeError or any other error that is not one of the three the module rai
     }
     await sleep(50);
     assert.equal(server.accepted(), 0);
+});
+
+test("when several mistakes are made at once, the one reported is the first of a fixed order, and none of them connects", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    const host = hostOf(server);
+    // Each line breaks two rules, and the message is the one of the rule that comes first: a flag
+    // given twice, a path with the host, the form of the timeout, a flag that needs a host, --select,
+    // --query, and last what the TLS module refuses (the target, then the server name, then the timeout).
+    /** @type {[string, string[], RegExp][]} */
+    const table = [
+        ["a repeated --host before a repeated --servername", ["--host", host, "--host", host, "--servername", "a", "--servername", "a"], /^certdrift: --host was given more than once\n/],
+        ["a repeated --servername before a repeated --timeout", ["--servername", "a", "--servername", "a", "--timeout", "5", "--timeout", "5"], /^certdrift: --servername was given more than once\n/],
+        ["a repeated --timeout before a path", ["--host", host, "--timeout", "5", "--timeout", "5", "a.pem"], /^certdrift: --timeout was given more than once\n/],
+        ["a path before a bad timeout", ["--host", host, "--timeout", "0", "a.pem"], /^certdrift: --host takes no path and no "-"/],
+        ["a bad timeout before a repeated --select", ["--host", host, "--timeout", "0", "--select", "a", "--select", "b"], /^certdrift: --timeout needs a positive whole number of milliseconds, and got "0"\n/],
+        ["a server name without a host before a timeout without one", ["--timeout", "5", "--servername", "a", "a.pem"], /^certdrift: --servername is sent to a host, so it needs --host\n/],
+        ["a server name without a host before a repeated --select", ["--servername", "a", "--select", "a", "--select", "b", "a.pem"], /^certdrift: --servername is sent to a host, so it needs --host\n/],
+        ["a repeated --select before an unknown field", ["--host", host, "--select", "a", "--select", "b", "--query", "nope"], /^certdrift: --select was given more than once\n/],
+        ["an empty --select before what the module refuses", ["--host", "a b", "--select="], /^certdrift: --select needs the start of a sha256, and it is empty\n/],
+        ["an unknown field before what the module refuses", ["--host", "a b", "--query", "nope"], /^certdrift: unknown field in observation v1: nope\n/],
+        ["a target the module refuses before a server name and a timeout it refuses", ["--host", "a b", "--servername", "192.0.2.1", "--timeout", "5"], /^certdrift: target "a b" cannot be read: /],
+        ["a server name the module refuses before a timeout it refuses", ["--host", host, "--servername", "192.0.2.1", "--timeout", "2147483648"], /^certdrift: options\.servername must be a host name in ASCII, not an IP address\n/],
+        ["a timeout the module refuses after the digits check", ["--host", host, "--timeout", "2147483648"], /^certdrift: options\.timeoutMs must be a whole number of milliseconds from 1 to 2147483647\n/],
+    ];
+    for (const [name, args, message] of table) {
+        const result = await run(["inspect", ...args], { cwd: CWD });
+        assert.deepEqual([name, result.code, result.stdout], [name, 2, ""]);
+        assert.match(result.stderr, message, name);
+    }
+    await sleep(50);
+    assert.equal(server.accepted(), 0, "none of these connected");
+});
+
+test("the options list of --help names exactly the flags inspect takes, so a flag added to the options is a flag added to the help", async () => {
+    const help = (await run(["--help"])).stdout;
+    const listed = help.slice(help.indexOf("\nOptions:\n"), help.indexOf("\nInspecting a server:")).split("\n").flatMap((line) => {
+        const match = /^ {2}(?:-\w, )?--([a-z]+)[ \n]/.exec(line);
+        return match === null ? [] : [match[1]];
+    });
+    assert.deepEqual(listed.sort(), Object.keys(INSPECT_OPTIONS).sort());
 });
