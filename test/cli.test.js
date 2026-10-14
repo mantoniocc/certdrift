@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rootCertificates } from "node:tls";
+import { createSecureContext, createServer as createTlsServer, rootCertificates } from "node:tls";
 import { setTimeout as sleep } from "node:timers/promises";
 import { inspect, serializeObservation, AmbiguousTargetError } from "../src/index.js";
 import { derivedOf } from "../src/derived.js";
@@ -1852,7 +1852,7 @@ test("a host that cannot be reached, one that refuses the connection, one that d
     const cases = [
         ["cannot be reached", ["--host", "224.0.0.1"], /^certdrift: 224\.0\.0\.1: cannot be reached: /],
         ["refuses the connection", ["--host", `127.0.0.1:${closed}`], new RegExp(`^certdrift: 127\\.0\\.0\\.1:${closed}: connection refused: `)],
-        ["does not speak TLS", ["--host", hostOf(plain)], /^certdrift: 127\.0\.0\.1:\d+: the TLS handshake failed \(the host may not speak TLS\): wrong version number\n$/],
+        ["does not speak TLS", ["--host", hostOf(plain)], /^certdrift: 127\.0\.0\.1:\d+: the TLS handshake failed \(the host may not speak TLS\): wrong version number\nAn IP address sends no server name, [^\n]*--servername <name>\.\n$/],
         ["does not answer in time", ["--host", hostOf(silent), "--timeout", "300"], /^certdrift: 127\.0\.0\.1:\d+: did not answer in time: no answer from /],
     ];
     const headlines = [/cannot be reached/, /connection refused/, /the TLS handshake failed/, /did not answer in time/];
@@ -1956,6 +1956,157 @@ test("text from the host and the --host value as typed are escaped like any othe
         assert.equal(UNSAFE.test(result.stderr), false, JSON.stringify(result.stderr));
         assert.equal(result.stderr.includes("pwned\\u0007\\u{202E}\\u{85}.example"), echoed, result.stderr);
     }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The hint for a handshake that failed with no server name sent
+
+const NO_NAME_HINT = "An IP address sends no server name, and a server that needs one may refuse the handshake: try --servername <name>.";
+const HANDSHAKE_HEADLINE = "the TLS handshake failed (the host may not speak TLS): ";
+
+/** @param {string} target @param {string} [servername] */
+const requestOf = (target, servername) => ({ target, options: servername === undefined ? {} : { servername } });
+
+test("a handshake failure for an IPv4 or bracketed IPv6 target, with or without a port, given no --servername, adds that an IP address sends no server name and names --servername", () => {
+    const error = wrapped(HandshakeError, "x", { reason: "ssl/tls alert handshake failure" });
+    for (const target of ["192.0.2.1", "192.0.2.1:8443", "[2001:db8::1]", "[::1]:8443", "[2001:DB8::1]:443"]) {
+        assert.equal(hostFailure(error, { request: requestOf(target) }), `${HANDSHAKE_HEADLINE}ssl/tls alert handshake failure\n${NO_NAME_HINT}`, target);
+    }
+    assert.ok(NO_NAME_HINT.includes("--servername"));
+});
+
+test("a handshake failure for a named target or for any target given --servername carries no hint, and a failure to connect, a refusal and a timeout never carry it, for any target", () => {
+    const handshake = wrapped(HandshakeError, "x", { reason: "ssl/tls alert handshake failure" });
+    const headline = `${HANDSHAKE_HEADLINE}ssl/tls alert handshake failure`;
+    for (const target of ["example.com", "localhost:8443", "1.2.3.4.example", "1.2.3.4.example:443", "a", "xn--bcher-kva.example"]) {
+        assert.equal(hostFailure(handshake, { request: requestOf(target) }), headline, target);
+    }
+    for (const target of ["192.0.2.1", "192.0.2.1:8443", "[::1]", "[2001:db8::1]:8443", "example.com"]) {
+        assert.equal(hostFailure(handshake, { request: requestOf(target, "named.example") }), headline, `${target} with a server name`);
+    }
+
+    const others = [
+        wrapped(ConnectionError, "getaddrinfo ENOTFOUND a", { code: "ENOTFOUND" }),
+        wrapped(ConnectionError, "connect ECONNREFUSED a", { code: "ECONNREFUSED" }),
+        wrapped(ConnectionError, "connect ECONNRESET", { code: "ECONNRESET" }),
+        new ConnectionError("could not connect"),
+        new TimeoutError("no answer from a:443 within 5 ms while handshaking"),
+    ];
+    for (const target of ["192.0.2.1", "192.0.2.1:8443", "[::1]", "[2001:db8::1]:8443"]) {
+        for (const error of others) {
+            const text = String(hostFailure(error, { request: requestOf(target) }));
+            assert.equal(text.includes("\n"), false, `${target}: ${text}`);
+            assert.equal(text, hostFailure(error), `${target}: the same as without the request`);
+        }
+    }
+});
+
+test("hostFailure called with the error alone gives the text of before and no hint, even for a handshake failure", () => {
+    assert.equal(hostFailure(wrapped(HandshakeError, "x", { reason: "wrong version number" })), `${HANDSHAKE_HEADLINE}wrong version number`);
+    assert.equal(hostFailure(new HandshakeError("a:443 completed the handshake without a certificate")), `${HANDSHAKE_HEADLINE}a:443 completed the handshake without a certificate`);
+    assert.equal(hostFailure(new HandshakeError("x"), {}), `${HANDSHAKE_HEADLINE}x`);
+});
+
+test("whether the hint is given depends only on the target as typed and on --servername, never on the error's code, reason or text", () => {
+    const errors = [
+        wrapped(HandshakeError, "x", { reason: "wrong version number", code: "ERR_SSL_WRONG_VERSION_NUMBER" }),
+        wrapped(HandshakeError, "x", { reason: "ssl/tls alert handshake failure", code: "ERR_SSL_SSL/TLS_ALERT_HANDSHAKE_FAILURE" }),
+        wrapped(HandshakeError, "read ECONNRESET", { code: "ECONNRESET" }),
+        wrapped(HandshakeError, "x", { reason: "unrecognized name", code: "ERR_SSL_TLSV1_UNRECOGNIZED_NAME" }),
+        new HandshakeError("a:443 completed the handshake without a certificate"),
+        // The host's own words, which say what the hint says, change nothing.
+        wrapped(HandshakeError, "x", { reason: "an IP address sends no server name; try --servername <name>" }),
+        wrapped(HandshakeError, "x", { reason: "the server name is required" }),
+    ];
+    for (const error of errors) {
+        assert.equal(hostFailure(error, { request: requestOf("192.0.2.1") })?.endsWith(`\n${NO_NAME_HINT}`), true, String(error.cause ?? error.message));
+        assert.equal(hostFailure(error, { request: requestOf("[::1]:443") })?.endsWith(`\n${NO_NAME_HINT}`), true, String(error.cause ?? error.message));
+        assert.equal(hostFailure(error, { request: requestOf("example.com") })?.includes("\n"), false, String(error.cause ?? error.message));
+        assert.equal(hostFailure(error, { request: requestOf("192.0.2.1", "a.example") })?.includes("\n"), false, String(error.cause ?? error.message));
+    }
+});
+
+test("the hint is the same text for every target and every error, and holds nothing from the host, the certificate or the target", () => {
+    const hostile = `evil\u001b]0;pwned\u0007‮\u0085.example`;
+    const errors = [
+        wrapped(HandshakeError, "x", { reason: hostile }),
+        wrapped(HandshakeError, `${hostile}\nsecond line from the host`, {}),
+        new HandshakeError(hostile),
+    ];
+    for (const target of ["192.0.2.1", "10.20.30.40:8443", "[2001:db8::1]:8443", "[::ffff:192.0.2.1]"]) {
+        for (const error of errors) {
+            const text = String(hostFailure(error, { request: requestOf(target) }));
+            const lines = text.split("\n");
+            assert.equal(lines.length, 2, text);
+            assert.equal(lines[1], NO_NAME_HINT, text);
+            assert.equal(UNSAFE.test(text), false, text);
+            assert.equal(NO_NAME_HINT.includes(target), false, target);
+        }
+    }
+});
+
+test("a server that answers a handshake with plain text, reached by its address, gets the hint without --servername and none with it, exits 3 with nothing on standard output, says nothing with --quiet, and --json changes nothing", async (t) => {
+    const plain = await serveWith(t, (socket) => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"));
+    const host = hostOf(plain);
+    const first = `certdrift: ${host}: ${HANDSHAKE_HEADLINE}wrong version number\n`;
+
+    const bare = await run(["inspect", "--host", host]);
+    assert.deepEqual([bare.code, bare.stdout, bare.stderr], [3, "", `${first}${NO_NAME_HINT}\n`]);
+
+    const json = await run(["inspect", "--json", "--host", host]);
+    assert.deepEqual([json.code, json.stdout, json.stderr], [3, "", bare.stderr]);
+
+    for (const flag of ["-q", "--quiet"]) {
+        const quiet = await run(["inspect", flag, "--host", host]);
+        assert.deepEqual([quiet.code, quiet.stdout, quiet.stderr], [3, "", ""], flag);
+    }
+
+    // Given a name the module sends it, and the failure is the same one without the hint.
+    const named = await run(["inspect", "--host", host, "--servername", "named.example"]);
+    assert.deepEqual([named.code, named.stdout, named.stderr], [3, "", first]);
+});
+
+test("a server that has a certificate only for the names it is sent answers an address with an alert: the hint is shown, and with --servername the same server answers", async (t) => {
+    const context = createSecureContext({ key: fixture("leaf-p256.key"), cert: Buffer.concat(SERVED.map(fixture)) });
+    const names = /** @type {string[]} */ ([]);
+    // No default certificate: without a name there is nothing to send, and the handshake fails.
+    const server = createTlsServer({ SNICallback: (name, done) => { names.push(name); done(null, context); } });
+    server.on("tlsClientError", () => {});
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+    t.after(() => new Promise((resolve) => server.close(() => resolve(undefined))));
+    const host = `127.0.0.1:${/** @type {import("node:net").AddressInfo} */ (server.address()).port}`;
+
+    const without = await run(["inspect", "--host", host]);
+    assert.deepEqual([without.code, without.stdout], [3, ""]);
+    assert.match(without.stderr, /^certdrift: 127\.0\.0\.1:\d+: the TLS handshake failed \(the host may not speak TLS\): .+\n/);
+    assert.ok(without.stderr.endsWith(`\n${NO_NAME_HINT}\n`), without.stderr);
+    assert.deepEqual(names, []);
+
+    const named = await run(["inspect", "--json", "--host", host, "--servername", "a.example"]);
+    assert.equal(observationOf(named).observation.source.servername, "a.example");
+    assert.deepEqual(names, ["a.example"]);
+});
+
+test("a bracketed IPv6 address gets the hint from the command too", async (t) => {
+    let plain;
+    try {
+        plain = await serveWith(t, (socket) => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"), { host: "::1" });
+    } catch (error) {
+        return t.skip(`::1 cannot be bound here: ${/** @type {NodeJS.ErrnoException} */ (error).code}`);
+    }
+    const bare = await run(["inspect", "--host", `[::1]:${plain.port}`]);
+    assert.deepEqual([bare.code, bare.stdout], [3, ""]);
+    assert.equal(bare.stderr, `certdrift: [::1]:${plain.port}: ${HANDSHAKE_HEADLINE}wrong version number\n${NO_NAME_HINT}\n`);
+
+    const named = await run(["inspect", "--host", `[::1]:${plain.port}`, "--servername", "named.example"]);
+    assert.equal(named.stderr, `certdrift: [::1]:${plain.port}: ${HANDSHAKE_HEADLINE}wrong version number\n`);
+});
+
+test("today: a reset at once carries the hint exactly when Node.js reports it as a handshake failure, which depends on the system", async (t) => {
+    const server = await serveWith(t, (socket) => socket.resetAndDestroy());
+    const result = await run(["inspect", "--host", hostOf(server)]);
+    assert.deepEqual([result.code, result.stdout], [3, ""]);
+    assert.equal(result.stderr.includes(NO_NAME_HINT), result.stderr.includes("the TLS handshake failed"), result.stderr);
 });
 
 test("--verbose, --json, --quiet and --query work with --host as with a file, and the output is the one present() and serializeObservation() write", async (t) => {
@@ -2159,7 +2310,7 @@ test("a certificate that has expired, or has no lifetime, is printed like any ot
     }
 });
 
-test("every host failure ends the process by itself long before the default timeout, and prints one line of its own", async (t) => {
+test("every host failure ends the process by itself long before the default timeout, and prints one line of its own, and a second one only for the hint of a handshake that sent no server name", async (t) => {
     const plain = await serveWith(t, (socket) => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"));
     const closed = await closedPort();
     for (const target of [`127.0.0.1:${closed}`, hostOf(plain), "224.0.0.1"]) {
@@ -2167,7 +2318,9 @@ test("every host failure ends the process by itself long before the default time
         const result = await run(["inspect", "--host", target]);
         assert.equal(result.code, 3, target);
         assert.ok(Date.now() - before < 5000, `${target} took ${Date.now() - before} ms`);
-        assert.equal(result.stderr.trimEnd().split("\n").length, 1, result.stderr);
+        const hinted = target === hostOf(plain);
+        assert.equal(result.stderr.trimEnd().split("\n").length, hinted ? 2 : 1, result.stderr);
+        assert.equal(result.stderr.includes(NO_NAME_HINT), hinted, result.stderr);
         assert.equal(result.stderr.includes(ESC), false);
     }
 });

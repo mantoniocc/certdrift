@@ -5,9 +5,11 @@ import tls from "node:tls";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { INSPECT_OPTIONS } from "../bin/cli.js";
-import { HOST_OPTIONS, fetchHost, hostRequestOf, refusalOf } from "../bin/host.js";
+import { HOST_OPTIONS, fetchHost, hostFailure, hostRequestOf, refusalOf } from "../bin/host.js";
 import { safe } from "../bin/safe.js";
-import { closedPort, serveChain, serveSilent } from "./helpers/tls.js";
+import { HandshakeError } from "../src/tls/index.js";
+import { targetOf } from "../src/tls/target.js";
+import { closedPort, serveChain, serveSilent, serveWith } from "./helpers/tls.js";
 
 // What every command that takes a host shares: the flags that name it, the rules about them, the
 // check of the arguments before connecting, and what a failure says. The command's own output is
@@ -223,6 +225,82 @@ test("fetching gives what the server sent, and for a host that fails the line an
     assert.match(slow.message, /^certdrift: 127\.0\.0\.1:\d+: did not answer in time: no answer from .* within 200 ms/);
 });
 
+// ---------------------------------------------------------------------------------------------
+// The hint for a handshake that failed with no server name sent
+
+/** @param {string} target @param {string} [servername] */
+const requestOf = (target, servername) => ({ target, options: servername === undefined ? {} : { servername } });
+
+/** A handshake failure as the module raises it. */
+const handshakeFailure = () => new HandshakeError("the TLS handshake with a:443 failed: x", { cause: Object.assign(new Error("x"), { reason: "x" }) });
+
+/** Whether the failure of a handshake for this request carries the hint. */
+const hinted = (/** @type {Parameters<typeof hostFailure>[1]} */ context) => String(hostFailure(handshakeFailure(), context)).includes("\n");
+
+test("the hint reads a target as an address exactly when the TLS module sends no server name for it, on every target the module accepts, and does not throw on one it refuses", () => {
+    const addresses = [
+        "0.0.0.0", "127.0.0.1", "192.0.2.1", "192.0.2.1:1", "255.255.255.255:65535", "10.0.0.1:443",
+        "[::1]", "[::1]:8443", "[::]", "[2001:db8::1]", "[2001:DB8::1]:443", "[2001:0db8:0000:0000:0000:0000:0000:0001]",
+        "[2001:0db8:0000:0000:0000:0000:0000:0001]:8443", "[::ffff:192.0.2.1]", "[::FFFF:127.0.0.1]:443", "[64:ff9b::192.0.2.33]:1", "[0:0:0:0:0:0:0:1]",
+    ];
+    const names = [
+        "example.com", "Example.COM:8443", "1.2.3.4.example", "1.2.3.4.example:443", "localhost", "localhost:443", "xn--bcher-kva.example",
+        "a", "a:1", "1a", "1a.example", "1password.com", "0x7f.example", "_srv.example", "my-host.example.test:65535", "256.1.1.1.example",
+    ];
+    for (const target of [...addresses, ...names]) {
+        const module = targetOf(target);
+        assert.equal(hinted({ request: requestOf(target) }), module.servername === null, target);
+    }
+    assert.ok(addresses.every((target) => targetOf(target).servername === null), "every address of the corpus is one the module gives no name");
+    assert.ok(names.every((target) => typeof targetOf(target).servername === "string"), "every name of the corpus is one the module gives a name");
+
+    // A target the module refuses never reaches the recognizer, and it must not throw on one.
+    const refused = [
+        "", " ", ":", ":443", "[", "]", "[]", "[::1", "::1]", "[[::1]]", "[::1]x", "[::1]443", "[::g]", "[192.0.2.1]", "[example.com]", "[fe80::1%en0]",
+        "127.1", "0x7f.0.0.1", "256.1.1.1", "010.0.0.1", "127.0.0.1:0", "1.2.3.4:5:6", "::1", "2001:db8::1", "https://example.com", "a b", "\u0000", "[\n]", "[::1]\n",
+    ];
+    for (const target of refused) {
+        assert.throws(() => targetOf(target), TypeError, JSON.stringify(target));
+        assert.doesNotThrow(() => hostFailure(handshakeFailure(), { request: requestOf(target) }), JSON.stringify(target));
+    }
+});
+
+test("a command that calls the host flags something else gets the hint in its own words, and a server name given under those names is honoured", () => {
+    const names = { host: "host-a", servername: "servername-a", timeout: "timeout-a" };
+    const text = String(hostFailure(handshakeFailure(), { request: requestOf("192.0.2.1"), names }));
+    assert.match(text, /\nAn IP address sends no server name, [^\n]*try --servername-a <name>\.$/);
+    assert.equal(text.includes("--servername "), false);
+    assert.equal(text.includes("--host"), false);
+    assert.equal(hinted({ request: requestOf("192.0.2.1", "named.example"), names }), false);
+    assert.equal(hinted({ request: requestOf("example.com"), names }), false);
+
+    const other = String(hostFailure(handshakeFailure(), { request: requestOf("[::1]"), names: { host: "peer", servername: "peer-name", timeout: "peer-wait" } }));
+    assert.ok(other.endsWith("try --peer-name <name>."), other);
+});
+
+test("fetchHost gives the hint for an address without a server name, and not for a name or a given server name, and words it from the names it is given", async (t) => {
+    const plain = await serveWith(t, (socket) => socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"));
+    // Every connection goes to the local server, so a host name is tried without a name server.
+    const connect = tls.connect;
+    t.mock.method(tls, "connect", (/** @type {import("node:tls").ConnectionOptions} */ options, /** @type {unknown[]} */ ...rest) =>
+        /** @type {Function} */ (connect).call(tls, { ...options, host: "127.0.0.1", port: plain.port }, ...rest));
+
+    /** @param {Parameters<typeof fetchHost>} args */
+    const messageOf = async (...args) => {
+        const outcome = await fetchHost(...args);
+        assert.ok("message" in outcome, "the handshake fails");
+        return outcome.message;
+    };
+    const hint = /\nAn IP address sends no server name, [^\n]*try --servername <name>\.\n$/;
+
+    assert.match(await messageOf(requestOf("192.0.2.1:443")), /^certdrift: 192\.0\.2\.1:443: the TLS handshake failed \(the host may not speak TLS\): wrong version number\nAn IP/);
+    assert.match(await messageOf(requestOf("192.0.2.1:443")), hint);
+    assert.match(await messageOf(requestOf("[2001:db8::1]:443")), hint);
+    assert.equal((await messageOf(requestOf("plain.example:443"))).split("\n").length, 2, "a name: the line and its end");
+    assert.equal((await messageOf(requestOf("192.0.2.1:443", "named.example"))).split("\n").length, 2, "an address given a name");
+    assert.match(await messageOf(requestOf("192.0.2.1:443"), { names: { host: "host-b", servername: "servername-b", timeout: "timeout-b" } }), /try --servername-b <name>\.\n$/);
+});
+
 test("the three option definitions are written once and the options of inspect are composed from them", () => {
     assert.deepEqual(Object.keys(HOST_OPTIONS), ["host", "servername", "timeout"]);
     for (const name of /** @type {const} */ (["host", "servername", "timeout"])) {
@@ -267,7 +345,7 @@ test("bin/host.js imports only the TLS entry point that package.json exports, an
     const host = read("bin/host.js");
     const { exports } = JSON.parse(read("package.json"));
     assert.equal(exports["./tls"].default, "./src/tls/index.js");
-    assert.deepEqual(importedBy(host), ["../src/tls/index.js", "./safe.js"]);
+    assert.deepEqual(importedBy(host), ["node:net", "../src/tls/index.js", "./safe.js"]);
     assert.equal(/node:(?:crypto|tls)\b/.test(host), false);
     // A type may come from the TLS entry point too, and from nowhere else.
     const types = [...host.matchAll(/^\/\*\* @import [^\n]* from "([^"]+)" \*\/$/gm)].map((match) => match[1]);
