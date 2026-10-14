@@ -157,10 +157,11 @@ export async function serveSilent(t) {
  * A server that answers with what the callback does to each socket.
  * @param {import("node:test").TestContext} t
  * @param {(socket: import("node:net").Socket) => void} behaviour
+ * @param {{ host?: string }} [where] The address to listen on, the IPv4 loopback unless given.
  */
-export async function serveWith(t, behaviour) {
+export async function serveWith(t, behaviour, { host } = {}) {
     const server = createTcpServer((socket) => behaviour(socket));
-    const port = await listen(server);
+    const port = await listen(server, host);
     return closeAfter(t, track(server, port, [], true));
 }
 

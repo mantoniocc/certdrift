@@ -1,3 +1,4 @@
+import { isIPv4, isIPv6 } from "node:net";
 import { ConnectionError, HandshakeError, TimeoutError, fetchChain } from "../src/tls/index.js";
 import { safe } from "./safe.js";
 
@@ -120,13 +121,16 @@ export async function refusalOf({ target, options }) {
  * that goes with it. Ask `refusalOf` first: an argument the module refuses is a `TypeError` here,
  * and it is not caught, like every error that is not a failure of the host.
  * @param {HostRequest} request
+ * @param {{ names?: HostFlagNames }} [context] The names the command gives the flags, which the
+ *   failure's hint is worded from.
  * @returns {Promise<{ chain: FetchedChain } | { code: 3, message: string }>}
  */
-export async function fetchHost({ target, options }) {
+export async function fetchHost(request, { names = NAMES } = {}) {
+    const { target, options } = request;
     try {
         return { chain: await fetchChain(target, options) };
     } catch (error) {
-        const failure = hostFailure(error);
+        const failure = hostFailure(error, { request, names });
         if (failure === undefined) throw error;
         return { code: 3, message: `certdrift: ${safe(target)}: ${failure}\n` };
     }
@@ -140,18 +144,61 @@ export async function fetchHost({ target, options }) {
  * connection, which a person fixes differently, so the original error's code tells them apart.
  * Every part of the text comes from the error, and the host's own text can be in it, so it is shown
  * escaped.
+ *
+ * A failed handshake with a target that sent no server name says so on a second line, because a
+ * server that picks its certificate by name often answers that with an alert, and "the host may not
+ * speak TLS" then points away from the fix. Whether to say it is decided from the request alone:
+ * OpenSSL's code and wording for that alert change between versions, and a server may refuse the
+ * handshake for this reason in other words. Without the request nothing is known about what was
+ * typed, so nothing is added.
  * @param {unknown} error
+ * @param {{ request?: HostRequest, names?: HostFlagNames }} [context]
  * @returns {string | undefined}
  */
-export function hostFailure(error) {
+export function hostFailure(error, { request, names = NAMES } = {}) {
     if (error instanceof TimeoutError) return `did not answer in time: ${safe(error.message)}`;
-    if (error instanceof HandshakeError) return `the TLS handshake failed (the host may not speak TLS): ${safe(reasonOf(error))}`;
+    if (error instanceof HandshakeError) {
+        const headline = `the TLS handshake failed (the host may not speak TLS): ${safe(reasonOf(error))}`;
+        return sendsNoServerName(request) ? `${headline}\n${serverNameHint(names)}` : headline;
+    }
     if (error instanceof ConnectionError) {
         const code = error.cause instanceof Error && "code" in error.cause ? error.cause.code : undefined;
         const refused = code === "ECONNREFUSED" || code === "ECONNRESET";
         return `${refused ? "connection refused" : "cannot be reached"}: ${safe(reasonOf(error))}`;
     }
     return undefined;
+}
+
+/**
+ * Whether the request sent no server name: the target is an address, which has none of its own,
+ * and none was given.
+ * @param {HostRequest | undefined} request
+ */
+function sendsNoServerName(request) {
+    return request !== undefined && request.options.servername === undefined && isAddress(request.target);
+}
+
+/**
+ * Whether a target as typed is an IPv4 address, or an IPv6 address in brackets, each with or
+ * without a port. This is the rule `targetOf` applies in `src/tls/target.js` to give no server name
+ * to an address. It is written again here because `bin/` may import only the files `package.json`
+ * exports and that parser is not one of them, and exporting it would add to the public API. A test
+ * runs both on the same targets so that they stay in agreement. A target the module refuses never
+ * gets here, because `refusalOf` is asked first, but this must not throw on one.
+ * @param {string} target
+ */
+function isAddress(target) {
+    const bracketed = /^\[([^\]]*)\]/s.exec(target);
+    return bracketed === null ? isIPv4(target.split(":")[0]) : isIPv6(bracketed[1]);
+}
+
+/**
+ * What to say when a handshake failed for a target that sent no server name. It is the same text
+ * for every host and every error, and only the name of the flag comes from the command.
+ * @param {HostFlagNames} names
+ */
+function serverNameHint({ servername }) {
+    return `An IP address sends no server name, and a server that needs one may refuse the handshake: try --${servername} <name>.`;
 }
 
 /**
