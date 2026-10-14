@@ -116,6 +116,11 @@ test("a Date from another realm or of a subclass is an instant, and one with mil
     assert.deepEqual(outsideValidity(START, END, new Date(Date.parse(END) + 1000)), ["expired"]);
     assert.deepEqual(outsideValidity(new Date(Date.parse(START) + 999), END, START), []);
     assert.deepEqual(outsideValidity(START, END, new Date(Date.parse(START) - 1)), ["not yet valid"]);
+
+    // Before 1970 the cut is toward the earlier second, as `inspect()` cuts `at`: half a second after
+    // 23:59:58 is still 23:59:58, which is the end of this period and so inside it. Cutting toward
+    // zero would read 23:59:59 and call it expired.
+    assert.deepEqual(outsideValidity("1969-12-31T00:00:00Z", "1969-12-31T23:59:58Z", new Date("1969-12-31T23:59:58.500Z")), []);
 });
 
 test("a Date whose own getTime answers something else is read by its real time, or refused, and never read as current", () => {
@@ -147,6 +152,12 @@ test("the years 0000 and 9999 are instants as text, and a Date beyond them is co
     assert.deepEqual(outsideValidity(START, END, new Date(Date.UTC(10000, 0, 1))), ["expired"]);
     assert.deepEqual(outsideValidity(START, END, new Date(-62198755200000)), ["not yet valid"]);
     assert.throws(() => outsideValidity(START, END, "10000-01-01T00:00:00Z"), TypeError);
+    // An expanded year survives the round trip through `toISOString()` and is still not a timestamp
+    // of the contract, so only the pattern refuses it. Compared, they would read as expired and as
+    // not yet valid.
+    for (const text of ["+010000-01-01T00:00:00Z", "-000001-01-01T00:00:00Z"]) {
+        assert.throws(() => outsideValidity(START, END, text), (error) => error instanceof TypeError && error.message.startsWith("now must be a valid Date or a timestamp"), text);
+    }
 });
 
 test("a certificate whose validity ends before it starts is outside it in both ways between its dates, and is labelled with both", () => {
