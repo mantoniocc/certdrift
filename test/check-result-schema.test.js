@@ -540,9 +540,10 @@ test("the README says the policy never carries a key, a passphrase or anything r
     assert.match(text, /A policy with no entry besides the two validity ones is valid, and evaluating it produces a POLICY_EMPTY warning/);
 });
 
-test("the README says an absent Extended Key Usage and an empty one are different, and that a CA read as end-entity passes TARGET_NOT_END_ENTITY", () => {
+test("the README says an absent Extended Key Usage and an empty one are different, and that a CA read as end-entity passes TARGET_NOT_END_ENTITY with a KIND_UNRELIABLE warning on the observation", () => {
     const text = readmeText.replace(/\s+/g, " ").replaceAll("`", "");
     assert.match(text, /eku is null when the extension is absent, which means Extended Key Usage does not restrict the purpose/);
     assert.match(text, /An extension that is present and lists nothing \(\[\]\) permits nothing, so both fail on it, each with its own code, and rejectEku passes on it/);
     assert.match(text, /A CA that carries a known extension twice, or one that does not decode, reads as end-entity, so TARGET_NOT_END_ENTITY passes for it/);
+    assert.match(text, /The observation now carries a KIND_UNRELIABLE warning for that certificate/);
 });

@@ -127,5 +127,5 @@ Codes are versioned with the contract: adding a code is additive, and changing w
 
 `eku` is `null` when the extension is absent, which means Extended Key Usage does not restrict the purpose, not that the certificate is good for everything. That is why there are two rules about it: `expectEku` requires a usage to be listed, and `ekuAllows` only requires that the extension does not forbid it. An extension that is present and lists nothing (`[]`) permits nothing, so both fail on it, each with its own code, and `rejectEku` passes on it.
 
-`kind` is the one the observation gives, which is the one Node.js reads. A CA that carries a known extension twice, or one that does not decode, reads as `end-entity`, so `TARGET_NOT_END_ENTITY` passes for it.
+`kind` is the one the observation gives, which is the one Node.js reads. A CA that carries a known extension twice, or one that does not decode, reads as `end-entity`, so `TARGET_NOT_END_ENTITY` passes for it. The observation now carries a `KIND_UNRELIABLE` warning for that certificate.
 <!-- `kind` keeps the value Node.js gives even where a warning says it cannot be trusted, so the limit above holds with or without that warning. -->

@@ -28,6 +28,7 @@ test("the examples required by the contract exist", ()=> {
         "no-eku.json",
         "ip-san.json",
         "ed25519.json",
+        "kind-unreliable.json",
     ];
     for (const name of required) {
         assert.ok(exampleFiles.includes(name), `missing example ${name}`)
@@ -124,4 +125,27 @@ test("kind keeps its name, type and place among the required fields, and the con
     assert.deepEqual(kind, { type: "string", minLength: 1 });
     assert.ok(schema.$defs.certificate.required.includes("kind"));
     assert.equal(schema.properties.contract.const, 1);
+});
+
+test("the schema lists KIND_UNRELIABLE among the warning codes, says it comes after the others by certificate index, and an example carries it and validates", () => {
+    const { description: code } = schema.$defs.warning.properties.code;
+    assert.match(code, /Known values: DUPLICATE_CERTIFICATE, SAN_TYPE_UNREPRESENTED, KIND_UNRELIABLE\./);
+    assert.match(code, /KIND_UNRELIABLE, at most one per certificate/);
+    assert.match(code, /kind keeps the value Node\.js gives/);
+    assert.match(code, /never quotes a value from the certificate/);
+
+    const { description: order } = schema.properties.warnings;
+    assert.match(order, /first DUPLICATE_CERTIFICATE, in input order; then SAN_TYPE_UNREPRESENTED, by certificate index/);
+    assert.match(order, /then KIND_UNRELIABLE, by certificate index/);
+
+    const example = readJson(new URL("kind-unreliable.json", examplesUrl));
+    assert.deepEqual(errorsOf(example), []);
+    assert.deepEqual(example.warnings.map((/** @type {{ code: string }} */ warning) => warning.code), ["KIND_UNRELIABLE"]);
+    assert.equal(example.certificates[example.warnings[0].certificate].kind, "end-entity");
+});
+
+test("adding the KIND_UNRELIABLE warning keeps the contract at 1 and the shape of a warning", () => {
+    assert.equal(schema.properties.contract.const, 1);
+    assert.deepEqual(schema.$defs.warning.required, ["code", "certificate", "message"]);
+    assert.equal(schema.$defs.warning.properties.code.pattern, "^[A-Z][A-Z0-9_]*$");
 });

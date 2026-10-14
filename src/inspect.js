@@ -8,6 +8,7 @@ import { extendedKeyUsage } from "./usage.js";
 import { publicKeyOf } from "./key.js";
 import { derivedOf } from "./derived.js";
 import { validityDate } from "./dates.js";
+import { kindWarning } from "./kind-warning.js";
 
 /** @import { CertificateObservation, Observation, Source, SubjectAltNames } from "./index.js" */
 
@@ -51,13 +52,17 @@ export function inspect(material, options) {
         message: `the subject alternative names hold ${count} ${type} ${count === 1 ? "entry" : "entries"}, which the observation does not represent`,
     })));
 
+    // `kind` is Node.js's `ca`, which is false for a CA whose extensions it cannot read; the
+    // warning says for which certificates that may have happened.
+    const unreliable = chain.members.flatMap(({ certificate }, index) => kindWarning(certificate.raw, certificate.ca, index) ?? []);
+
     return {
         contract: 1,
         format: "x509",
         observation: { at: timestamp(at), source },
         target: chain.target,
         certificates,
-        warnings: [...chain.warnings, ...unrepresented],
+        warnings: [...chain.warnings, ...unrepresented, ...unreliable],
     };
 }
 
@@ -66,7 +71,9 @@ export function inspect(material, options) {
  *
  * `kind` follows Node.js's `ca`, which is false for a certificate marked CA whose Key Usage
  * lacks `keyCertSign`: that bit is what lets a key sign certificates, and verifiers such as
- * OpenSSL do not accept such a certificate as a CA either.
+ * OpenSSL do not accept such a certificate as a CA either. It is also false for a CA that
+ * carries a known extension twice or one that does not decode, and `kind` keeps that value:
+ * `inspect()` adds a KIND_UNRELIABLE warning for those certificates.
  * @param {import("./material.js").CertificateRead} read
  * @param {number} index
  * @param {number[]} issuedBy
