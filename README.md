@@ -37,6 +37,19 @@ The certificates are exactly the ones the server sent, in the order it sent them
 
 A host that cannot be reached, one that refuses the connection, one that does not speak TLS and one that does not answer in time each exit with code 3, and the message says which. A server that sends several certificates that could each be the one the connection is about exits with code 2 listing them, and `--select` chooses, as it does for a file.
 
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success. |
+| `2` | Misuse, a `--query` path the schema does not declare, or a bundle whose certificate is ambiguous (the candidates are listed). |
+| `3` | The file is missing or unreadable, the material is not a certificate, or the host cannot be reached, refuses the connection, does not speak TLS or does not answer in time. |
+| `4` | The command crashed: an error it did not expect, which is a bug. The error is printed on standard error as it is, even with `--quiet`. |
+
+<!-- PENDING: list exit code 1, "a check failed", in this table once the checking command exists. Nothing exits with 1 until then, so listing it would describe a code that is never given. -->
+
+A fault that kills Node.js with a signal cannot be caught, and the shell then reports a code of its own, for example 134 or 139.
+
 ## Requirements and results
 
 A check compares a certificate with what a person requires and says, for each requirement, what it found. Two documents carry that, both JSON, both with their own `contract` number and their own schema in `schema/`: the **policy** says what is required, and the **check result** says what was found. The package describes these documents, checks the shape of a policy and writes a check result; it does not evaluate a policy.

@@ -9,7 +9,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { inspect, serializeObservation, AmbiguousTargetError } from "../src/index.js";
 import { derivedOf } from "../src/derived.js";
 import { ConnectionError, HandshakeError, TimeoutError, fetchChain } from "../src/tls/index.js";
-import { INSPECT_OPTIONS, present, timeRemaining } from "../bin/cli.js";
+import { INSPECT_OPTIONS, main, present, timeRemaining } from "../bin/cli.js";
 import { hostFailure } from "../bin/host.js";
 import { validatorFor } from "./helpers/schema.js";
 import { closedPort, serveChain, serveSilent, serveWith } from "./helpers/tls.js";
@@ -61,6 +61,8 @@ const typed = (/** @type {string} */ name) => `test/fixtures/${name}`;
  * @property {string[]} [nodeArguments] Placed before the script, e.g. `--import`.
  * @property {boolean} [direct] Runs the file itself instead of through `node`.
  * @property {boolean} [closeStdout] Closes the reading end of standard output before the command writes.
+ * @property {boolean} [closeStderr] Closes the reading end of standard error before the command writes.
+ * @property {number} [killAfterMs] Kills the command after this long, so that one that does not end fails its test instead of holding the run.
  */
 
 /**
@@ -70,7 +72,7 @@ const typed = (/** @type {string} */ name) => `test/fixtures/${name}`;
  * @param {RunOptions} [options]
  * @returns {Promise<Result>}
  */
-function run(args, { input, openStdin, env = {}, cwd, nodeArguments = [], direct, closeStdout } = {}) {
+function run(args, { input, openStdin, env = {}, cwd, nodeArguments = [], direct, closeStdout, closeStderr, killAfterMs } = {}) {
     /** @type {Record<string, string | undefined>} */
     const merged = { PATH: process.env.PATH, NO_COLOR: "1", ...env };
     for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key];
@@ -84,6 +86,8 @@ function run(args, { input, openStdin, env = {}, cwd, nodeArguments = [], direct
     const { stdout, stderr } = child;
     if (stdout === null || stderr === null) throw new Error("the child has no output streams");
     if (closeStdout) stdout.destroy();
+    if (closeStderr) stderr.destroy();
+    const killer = killAfterMs === undefined ? undefined : setTimeout(() => child.kill("SIGKILL"), killAfterMs);
     if (input !== undefined) child.stdin?.end(input);
 
     return new Promise((resolve, reject) => {
@@ -95,6 +99,7 @@ function run(args, { input, openStdin, env = {}, cwd, nodeArguments = [], direct
         child.on("error", reject);
         child.on("close", (code) => {
             child.stdin?.destroy();
+            clearTimeout(killer);
             resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") });
         });
     });
@@ -1481,7 +1486,7 @@ test("--query reads the schema from disk next to the command, from any working d
     // A schema that is not there is a broken installation, not misuse and not bad material.
     rmSync(join(copy, "schema"), { recursive: true });
     const broken = await runCopy("target");
-    assert.equal(broken.code, 1);
+    assert.equal(broken.code, 4);
     assert.match(broken.stderr, /observation\.schema\.json/);
     // And it is only read when --query is given.
     const plain = await spawnCopy(installed, ["inspect", "--json", absolute], dir);
@@ -2331,17 +2336,387 @@ import tls from "node:tls";
 tls.connect = () => { throw new ${error}("a bug inside the connection code"); };
 `)}`;
 
-test("a TypeError or any other error that is not one of the three the module raises for a host is a bug and is not caught: it is neither misuse (2) nor a host failure (3)", async (t) => {
+test("a TypeError or any other error that is not one of the three the module raises for a host is a bug: it is turned into neither misuse (2) nor a host failure (3), and it exits 4 with the error as it is", async (t) => {
     const server = await serveChain(t, { certs: SERVED });
     for (const error of ["TypeError", "RangeError", "Error"]) {
         const result = await run(["inspect", "--host", hostOf(server)], { nodeArguments: ["--import", throwing(error)] });
-        assert.equal(result.code, 1, `${error}: ${result.stderr}`);
+        assert.equal(result.code, 4, `${error}: ${result.stderr}`);
         assert.equal(result.stdout, "");
         assert.match(result.stderr, new RegExp(`${error}: a bug inside the connection code`));
         assert.equal(result.stderr.startsWith("certdrift: "), false, "not worded as the command's own message");
     }
     await sleep(50);
     assert.equal(server.accepted(), 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// A crash: an error nobody expected ends the process with exit code 4
+
+/**
+ * The URL of a module for `--import`, which makes something the command depends on fail the way a
+ * bug would.
+ * @param {string} source
+ */
+const preload = (source) => `data:text/javascript,${encodeURIComponent(source)}`;
+
+// Each of these makes the command throw `expression`, from a different place. The first four raise
+// it inside `main()`; the last two raise it where no `try` around `main()` can see it.
+
+/** A write to standard output throws, as the first thing the command prints with `--help`. @param {string} expression */
+const throwOnWrite = (expression) => preload(`process.stdout.write = () => { throw ${expression}; };`);
+
+/** Standard error throws on the command's own messages only, so the report of the crash gets through. @param {string} expression */
+const throwOnMessage = (expression) => preload(`const write = process.stderr.write; process.stderr.write = function (text, ...rest) { if (String(text).startsWith("certdrift:")) throw ${expression}; return write.call(this, text, ...rest); };`);
+
+/** Reading a file rejects, with no `code`, so it is not a file the command can not read. @param {string} expression */
+const throwOnRead = (expression) => preload(`import fs from "node:fs/promises"; import { syncBuiltinESMExports } from "node:module"; fs.readFile = async () => { throw ${expression}; }; syncBuiltinESMExports();`);
+
+/** Reading standard input throws. @param {string} expression */
+const throwOnStdin = (expression) => preload(`process.stdin[Symbol.asyncIterator] = async function* () { throw ${expression}; };`);
+
+/** Connecting throws, as a bug in the connection code would. @param {string} expression */
+const throwOnConnect = (expression) => preload(`import tls from "node:tls"; tls.connect = () => { throw ${expression}; };`);
+
+/**
+ * Standard output emits each error after the command has put its listener on it, and that listener
+ * rethrows anything but EPIPE. Run it with `-` and `openStdin`: the command then waits for standard
+ * input, so the error arrives while `main()` is still pending whatever the speed of the machine.
+ * @param {string[]} expressions
+ */
+const throwFromListener = (...expressions) => preload(`const on = process.stdout.on; process.stdout.on = function (event, listener) { const result = on.call(this, event, listener); if (event === "error") for (const error of [${expressions.join(", ")}]) setImmediate(() => this.emit("error", error)); return result; };`);
+
+/** A promise nobody awaits is rejected when the command first writes. @param {string} expression */
+const rejectOnWrite = (expression) => preload(`const write = process.stdout.write; process.stdout.write = function (...rest) { Promise.reject(${expression}); return write.apply(this, rest); };`);
+
+/** A bug that happens a moment after a connection starts, in code the command does not await. */
+const CRASH_WHILE_CONNECTING = preload(`import tls from "node:tls"; const connect = tls.connect; tls.connect = (...args) => { const socket = connect(...args); setImmediate(() => { throw new Error("a bug in a socket handler"); }); return socket; };`);
+
+/**
+ * Runs the command with something made to fail.
+ * @param {string[]} args
+ * @param {string | string[]} preloaded One module for `--import`, or several.
+ * @param {RunOptions} [options]
+ */
+const crashing = (args, preloaded, options = {}) => run(args, { cwd: CWD, killAfterMs: 15_000, ...options, nodeArguments: [preloaded].flat().flatMap((url) => ["--import", url]) });
+
+/** @param {string} place */
+const bug = (place) => `new TypeError("a bug ${place}")`;
+
+/**
+ * What every crash looks like: exit 4, the error on standard error, nothing on standard output, and
+ * nothing that reads as one of the command's own messages.
+ * @param {Result} result
+ * @param {RegExp} pattern
+ * @param {string} label
+ */
+function assertCrash(result, pattern, label) {
+    assert.equal(result.code, 4, `${label}: ${result.stderr}`);
+    assert.equal(result.stdout, "", label);
+    assert.match(result.stderr, pattern, label);
+    assert.equal(result.stderr.startsWith("certdrift: "), false, `${label}: not worded as the command's own message`);
+}
+
+test("an unexpected error exits 4 wherever it is raised: printing help, a misuse message, reading a file, reading standard input and fetching a host", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    /** @type {[string, string[], string, RunOptions][]} */
+    const table = [
+        ["printing help", ["inspect", "--help"], throwOnWrite(bug("while printing help")), {}],
+        ["a misuse message", ["inspect"], throwOnMessage(bug("while printing a misuse message")), {}],
+        ["reading a file", ["inspect", typed("leaf-p256.pem")], throwOnRead(bug("while reading a file")), {}],
+        ["reading standard input", ["inspect", "-"], throwOnStdin(bug("while reading standard input")), { openStdin: true }],
+        ["fetching a host", ["inspect", "--host", hostOf(server)], throwOnConnect(bug("while fetching a host")), {}],
+    ];
+    for (const [place, args, preloaded, options] of table) {
+        assertCrash(await crashing(args, preloaded, options), new RegExp(`^TypeError: a bug .*${place}$`, "m"), place);
+    }
+});
+
+test("main() still throws what is thrown inside it, an Error or a string, and gives no exit code for it", async () => {
+    for (const thrown of [new TypeError("thrown inside main"), "a thrown string"]) {
+        const io = { env: {}, stdin: (async function* () {})(), stdout: { write() { throw thrown; }, on() {} }, stderr: { write() {}, on() {} } };
+        /** @type {unknown} */
+        let caught = "main() returned";
+        try {
+            caught = await main(["--help"], io);
+        } catch (error) {
+            caught = error;
+        }
+        assert.equal(caught, thrown);
+    }
+});
+
+test("a crash prints the error's name, message, stack, properties and cause on standard error, nothing on standard output, and no \"certdrift: \" prefix", async () => {
+    const error = `Object.assign(new TypeError("outer failure", { cause: new Error("first cause", { cause: new RangeError("second cause", { cause: new Error("innermost cause") }) }) }), { code: "E_BUG" })`;
+    const result = await crashing(["inspect", "--help"], throwOnWrite(error));
+    assertCrash(result, /^TypeError: outer failure$/m, "the name and the message");
+    assert.match(result.stderr, /^ {2}code: 'E_BUG'/m, "an own property");
+    for (const cause of ["[cause]: Error: first cause", "[cause]: RangeError: second cause", "[cause]: Error: innermost cause"]) {
+        assert.ok(result.stderr.includes(cause), `${cause}, however deep`);
+    }
+    assert.match(result.stderr, /^ +at /m, "the stack");
+    assert.doesNotMatch(result.stderr, /^Node\.js v/m, "the report is the command's, not Node.js's own");
+});
+
+test("the text of a crash is escaped line by line: an escape character, U+202E and U+2028 never reach standard error raw, and the line breaks stay", async () => {
+    const hostile = `first ${ESC}[2J ‮ reversed   separated\nlast line`;
+    const error = `Object.assign(new Error(${JSON.stringify(hostile)}), { detail: ${JSON.stringify(`${ESC}]0;title\u0007 ‮`)} })`;
+    const result = await crashing(["inspect", "--help"], throwOnWrite(error));
+    assert.equal(result.code, 4, result.stderr);
+    assert.equal(UNSAFE.test(result.stderr), false, "no control or direction character");
+    assert.equal(result.stderr.includes(" "), false);
+    assert.equal(result.stderr.includes(ESC), false);
+    assert.ok(result.stderr.includes("first \\u{1B}[2J \\u{202E} reversed \\u{2028} separated\n"), result.stderr);
+    assert.ok(result.stderr.split("\n").includes("last line"), "the break between lines is the error's own and stays");
+});
+
+test("a crash reports what an error holds beyond its message: the errors of an AggregateError, a cause that refers back to the error, and a value nested far deeper than Node.js shows by default", async () => {
+    const aggregate = await crashing(["inspect", "--help"], throwOnWrite('new AggregateError([new Error("first of many"), "second of many"], "many failures")'));
+    assertCrash(aggregate, /^AggregateError: many failures$/m, "an AggregateError");
+    assert.match(aggregate.stderr, /^ +Error: first of many$/m);
+    assert.ok(aggregate.stderr.includes("'second of many'"), aggregate.stderr);
+
+    const circular = await crashing(["inspect", "--help"], throwOnWrite('(() => { const error = new Error("loop"); error.cause = error; return error; })()'));
+    assertCrash(circular, /^<ref \*1> Error: loop$/m, "a circular cause");
+    assert.ok(circular.stderr.includes("[Circular *1]"), circular.stderr);
+
+    const deep = await crashing(["inspect", "--help"], throwOnWrite("(() => { let nested = {}; for (let level = 0; level < 100_000; level++) nested = { nested }; return nested; })()"));
+    assert.equal(deep.code, 4, deep.stderr.slice(0, 300));
+    assert.equal(deep.stdout, "");
+    assert.ok(deep.stderr.startsWith("{\n"), deep.stderr.slice(0, 100));
+
+    // The name of an error, its cause, its errors and the description of a symbol are text too.
+    const hostile = `(() => { const error = new Error("named"); error.name = "${ESC}[31mEvil‮"; error.cause = "cause ${ESC}[2J"; error.errors = ["‮"]; error.symbol = Symbol(" "); return error; })()`;
+    const named = await crashing(["inspect", "--help"], throwOnWrite(hostile));
+    assert.equal(named.code, 4, named.stderr);
+    assert.equal(UNSAFE.test(named.stderr), false, "no control or direction character");
+    assert.equal(named.stderr.includes(" "), false);
+    assert.ok(named.stderr.includes("\\u{1B}[31mEvil\\u{202E}: named"), named.stderr);
+});
+
+test("--quiet does not silence a crash, whether it comes from a host, from a file or from outside main()", async (t) => {
+    const server = await serveChain(t, { certs: SERVED });
+    /** @type {[string, string[], string, RunOptions][]} */
+    const table = [
+        ["a host", ["inspect", "-q", "--host", hostOf(server)], throwOnConnect(bug("while fetching a host")), {}],
+        ["a file", ["inspect", "--quiet", typed("leaf-p256.pem")], throwOnRead(bug("while reading a file")), {}],
+        ["outside main()", ["inspect", "-q", "-"], throwFromListener('Object.assign(new Error("EIO outside main"), { code: "EIO" })'), { openStdin: true }],
+    ];
+    for (const [place, args, preloaded, options] of table) {
+        assertCrash(await crashing(args, preloaded, options), /^(?:TypeError: a bug |Error: EIO outside main)/m, place);
+    }
+    // The same command line without a bug prints nothing, so what is printed above is the crash.
+    const quiet = await run(["inspect", "-q", "--host", hostOf(server)]);
+    assert.deepEqual([quiet.code, quiet.stdout, quiet.stderr], [0, "", ""]);
+});
+
+test("no file of bin/ calls process.exit, so the exit code is only ever set with process.exitCode", () => {
+    // `process.exit()` can cut off output waiting in a pipe, but only on macOS, so no test on Linux
+    // can see it happen. The source is read instead. A match in a comment counts, as in the rules
+    // of invariants.test.js.
+    const CALL = /\bprocess\s*\.\s*exit\s*(?:\?\.\s*)?\(/;
+    for (const text of ["process.exit(1);", "process.exit (0)", "process\n    .exit(2)", "process.exit?.(1)", "await main(); process.exit()"]) {
+        assert.equal(CALL.test(text), true, JSON.stringify(text));
+    }
+    for (const text of ["process.exitCode = 4;", "process.exitCode = await main()", "the exit code", "process.stdout.write(text)"]) {
+        assert.equal(CALL.test(text), false, JSON.stringify(text));
+    }
+    const files = readdirSync(new URL("bin/", root), { recursive: true, encoding: "utf8" }).filter((path) => /\.[cm]?js$/.test(path));
+    assert.ok(files.includes("certdrift.js") && files.includes("cli.js"), `the scan found ${files.join(", ")}`);
+    assert.deepEqual(files.filter((path) => CALL.test(readFileSync(new URL(`bin/${path}`, root), "utf8"))), []);
+});
+
+test("exit codes 0, 2 and 3 and what each one means do not change: the help words them as before, and each is still given with no crash report", async () => {
+    const help = (await run(["--help"])).stdout;
+    assert.ok(
+        help.includes(
+            [
+                "Exit codes:",
+                "  0  Success.",
+                "  2  Misuse, a --query path the schema does not declare, or a bundle whose certificate is",
+                "     ambiguous (the candidates are listed).",
+                "  3  The file is missing or unreadable, the material is not a certificate, or the host cannot be",
+                "     reached, refuses the connection, does not speak TLS or does not answer in time.",
+                "  4  ",
+            ].join("\n"),
+        ),
+        help,
+    );
+    for (const [args, code] of /** @type {[string[], number][]} */ ([
+        [["inspect", typed("leaf-p256.pem")], 0],
+        [["inspect"], 2],
+        [["inspect", typed("bundle-two-leaves.pem")], 2],
+        [["inspect", "missing.pem"], 3],
+        [["inspect", typed("leaf-p256.key")], 3],
+    ])) {
+        const result = await run(args, { cwd: CWD });
+        assert.equal(result.code, code, `${args.join(" ")}: ${result.stderr}`);
+        assert.doesNotMatch(result.stderr, /^ +at /m, "no stack: nothing crashed");
+        if (code !== 0) assert.match(result.stderr, /^certdrift: /);
+    }
+});
+
+test("the help lists exit code 4, and the README has a table of exit codes that lists exactly 0, 2, 3 and 4 and says a fault that kills Node.js with a signal can not be caught", async () => {
+    const help = (await run(["--help"])).stdout;
+    assert.match(help, /^ {2}4 {2}The command crashed: an error it did not expect, which is a bug\./m);
+    assert.match(help.replace(/\s+/g, " "), /The error is printed on standard error as it is, even with --quiet\./);
+
+    const text = readFileSync(new URL("README.md", root), "utf8");
+    const start = text.indexOf("\n## Exit codes\n");
+    assert.notEqual(start, -1, "the README has an Exit codes section");
+    const section = text.slice(start + 1, text.indexOf("\n## ", start + 1));
+    assert.deepEqual([...section.matchAll(/^\| `(\d+)` \|/gm)].map((match) => match[1]), ["0", "2", "3", "4"]);
+    const flat = section.replace(/`/g, "").replace(/\s+/g, " ");
+    assert.match(flat, /A fault that kills Node\.js with a signal cannot be caught, and the shell then reports a code of its own, for example 134 or 139\./);
+    assert.match(flat, /The command crashed: an error it did not expect, which is a bug\. The error is printed on standard error as it is, even with --quiet\./);
+});
+
+test("a thrown value that is not an Error is printed as util.inspect writes it, a string in quotes, so that it never reads as a message of the command", async () => {
+    /** @type {[string, string][]} */
+    const table = [
+        ["'certdrift: this is not a message of the command'", "'certdrift: this is not a message of the command'"],
+        ["'plain text'", "'plain text'"],
+        ["null", "null"],
+        ["undefined", "undefined"],
+        ["42", "42"],
+        ["Symbol('s')", "Symbol(s)"],
+        ["{ code: 'X', list: [1, 2] }", "{ code: 'X', list: [ 1, 2 ] }"],
+    ];
+    for (const [expression, printed] of table) {
+        const result = await crashing(["inspect", "--help"], throwOnWrite(expression));
+        assert.deepEqual([expression, result.code, result.stdout, result.stderr], [expression, 4, "", `${printed}\n`]);
+    }
+});
+
+test("a crash on a path that involves no host, reading a file or reading standard input, exits 4 the same way, whatever was thrown", async () => {
+    const file = await crashing(["inspect", typed("leaf-p256.pem")], throwOnRead("'a string thrown while reading'"));
+    assert.deepEqual([file.code, file.stdout, file.stderr], [4, "", "'a string thrown while reading'\n"]);
+    const stdin = await crashing(["inspect", "-"], throwOnStdin("new RangeError('a range error while reading')"), { openStdin: true });
+    assertCrash(stdin, /^RangeError: a range error while reading$/m, "standard input");
+});
+
+test("an error thrown outside main()'s promise, by a listener or by a promise nobody awaits, is reported like any other and exits 4, and only the first one is reported", async () => {
+    // The listener the command puts on standard output rethrows an error that is not EPIPE, and a
+    // `try` around `main()` never sees it. Nothing the command would print afterwards gets out.
+    const listener = await crashing(["inspect", "--json", "-"], throwFromListener('Object.assign(new Error("EIO outside main"), { code: "EIO" })'), { openStdin: true });
+    assertCrash(listener, /^Error: EIO outside main$/m, "a listener");
+    assert.match(listener.stderr, /^ {2}code: 'EIO'/m);
+
+    const rejected = await crashing(["inspect", "--query", "certificates[0].kind", typed("leaf-p256.pem")], rejectOnWrite('new RangeError("nobody awaits this")'));
+    assert.equal(rejected.code, 4, rejected.stderr);
+    assert.match(rejected.stderr, /^RangeError: nobody awaits this$/m);
+    assert.equal(rejected.stderr.startsWith("certdrift: "), false);
+    assert.equal(rejected.stdout, "end-entity\n", "what was printed before the bug stays, and nothing after it");
+
+    // Node.js wraps a reason that is not an Error, and the command reports the wrapper.
+    const text = await crashing(["inspect", "--help"], rejectOnWrite('"just some text"'));
+    assert.equal(text.code, 4, text.stderr);
+    assert.ok(text.stderr.includes("just some text"), text.stderr);
+
+    // The report of the first is the only one: a second error must not add to it or change the code.
+    const twice = await crashing(["inspect", "--json", "-"], throwFromListener('new Error("EIO number 1")', 'new Error("EIO number 2")'), { openStdin: true });
+    assertCrash(twice, /^Error: EIO number 1$/m, "the first");
+    assert.equal(twice.stderr.includes("EIO number 2"), false, twice.stderr);
+});
+
+/**
+ * Runs the command like `crashing`, killed after 15 s if it has not ended, and says when the first thing appeared on standard error and
+ * when the process ended, in milliseconds after it started.
+ * @param {string[]} args
+ * @param {string} preloaded
+ * @returns {Promise<Result & { reported: number, ended: number }>}
+ */
+function timed(args, preloaded) {
+    return new Promise((resolve, reject) => {
+        const started = Date.now();
+        const child = spawn(process.execPath, ["--import", preloaded, BIN, ...args], { cwd: CWD, env: { PATH: process.env.PATH, NO_COLOR: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+        let reported = -1;
+        const killer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+        /** @type {Buffer[]} */ const out = [];
+        /** @type {Buffer[]} */ const err = [];
+        child.stdout.on("data", (chunk) => out.push(chunk));
+        child.stderr.on("data", (chunk) => {
+            if (reported < 0) reported = Date.now() - started;
+            err.push(chunk);
+        });
+        child.on("error", reject);
+        child.on("close", (code) => {
+            clearTimeout(killer);
+            resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8"), reported, ended: Date.now() - started });
+        });
+    });
+}
+
+test("after a crash the process ends by itself: with standard input left open, with standard error closed, and while a connection is pending", { timeout: 60_000 }, async (t) => {
+    // A pipe can stay open for as long as its writer lives, so nothing must wait for it.
+    const before = Date.now();
+    const open = await crashing(["inspect", "-"], throwFromListener('Object.assign(new Error("EIO outside main"), { code: "EIO" })'), { openStdin: true });
+    assertCrash(open, /^Error: EIO outside main$/m, "standard input open");
+    assert.ok(Date.now() - before < 5000, `took ${Date.now() - before} ms`);
+
+    // Nobody reads the report, and the failure to write it must not make the process wait or loop.
+    const closed = await crashing(["inspect", "--help"], throwOnWrite(bug("with standard error closed")), { closeStderr: true });
+    assert.equal(closed.code, 4);
+    assert.equal(closed.stdout, "");
+
+    // A host that answers normally: the observation the command would print after the bug is not printed.
+    const server = await serveChain(t, { certs: SERVED });
+    const answered = await timed(["inspect", "--host", hostOf(server)], CRASH_WHILE_CONNECTING);
+    assertCrash(answered, /^Error: a bug in a socket handler$/m, "a host that answers");
+    assert.ok(answered.ended < 5000, `took ${answered.ended} ms`);
+
+    // A host that never answers: the report is immediate, and the process ends when its pending work
+    // does, which is the connection's timeout. Nothing is printed after the report, and in
+    // particular not the command's own "did not answer in time" with exit 3.
+    const silent = await serveSilent(t);
+    const pending = await timed(["inspect", "--host", hostOf(silent), "--timeout", "1500"], CRASH_WHILE_CONNECTING);
+    assertCrash(pending, /^Error: a bug in a socket handler$/m, "a host that does not answer");
+    assert.equal(pending.stderr.includes("did not answer"), false, pending.stderr);
+    assert.equal(pending.stderr.split("\n").filter((line) => line.startsWith("certdrift:")).length, 0);
+    assert.ok(pending.ended - pending.reported >= 1000, `the report came at ${pending.reported} ms and the process ended at ${pending.ended} ms`);
+    assert.ok(pending.ended < 5000, `took ${pending.ended} ms`);
+});
+
+/**
+ * Makes `util.inspect`, which the entry point imports by name, throw. With `onlyCustom` it throws
+ * only on the first attempt, the one that runs a custom inspector, as it would for a value whose own
+ * inspector fails. Whether the real one throws for a given value depends on the Node.js build, so the
+ * path that handles a throwing `inspect` is made by replacing it.
+ * @param {boolean} onlyCustom
+ */
+const brokenInspect = (onlyCustom) => preload(`import util from "node:util"; import { syncBuiltinESMExports } from "node:module"; const real = util.inspect; util.inspect = (value, options) => { if (${onlyCustom} && options?.customInspect === false) return real(value, options); throw new Error("inspect is broken"); }; syncBuiltinESMExports(); `);
+
+test("a value that can not be inspected is still reported and exits 4, and not the 7 of a handler that throws", async () => {
+    /** @type {[string, string[], (expression: string) => string, RunOptions][]} */
+    const places = [
+        ["inside main()", ["inspect", "--help"], throwOnWrite, {}],
+        ["outside main()", ["inspect", "-"], (expression) => throwFromListener(expression), { openStdin: true }],
+    ];
+    for (const [place, args, raise, options] of places) {
+        // inspect fails on a custom inspector, so the value is shown the way it is without one.
+        const withoutCustom = await crashing(args, [raise("{ code: 'X' }"), brokenInspect(true)], options);
+        assert.deepEqual([place, withoutCustom.code, withoutCustom.stdout, withoutCustom.stderr], [place, 4, "", "{ code: 'X' }\n"]);
+        // inspect fails whatever it is asked, so a fixed line says that the value can not be shown.
+        const nothing = await crashing(args, [raise("{ code: 'X' }"), brokenInspect(false)], options);
+        assert.deepEqual([place, nothing.code, nothing.stdout, nothing.stderr], [place, 4, "", "The thrown value cannot be shown: inspecting it throws too.\n"]);
+
+        // Real values that make inspect throw on some builds of Node.js and not on others: either way
+        // there is a report and the exit code is 4.
+        const custom = `{ [Symbol.for("nodejs.util.inspect.custom")]() { throw new Error("custom inspection failed"); } }`;
+        const stackGetter = `(() => { const error = new Error("stack getter"); Object.defineProperty(error, "stack", { get() { throw new Error("no stack"); } }); return error; })()`;
+        for (const expression of [custom, stackGetter]) {
+            const result = await crashing(args, raise(expression), options);
+            assertCrash(result, /\S/, `${place}: ${expression.slice(0, 40)}`);
+        }
+    }
+});
+
+test("a package that lost one of its files exits 4 with the error as it is, not 1 with the report of Node.js", async (t) => {
+    const dir = scratch(t);
+    for (const entry of ["bin", "src", "schema", "package.json"]) cpSync(new URL(entry, root).pathname, join(dir, entry), { recursive: true });
+    rmSync(join(dir, "src", "policy.js"));
+    const result = await spawnCopy(join(dir, "bin", "certdrift.js"), ["inspect", "--json", new URL(typed("leaf-p256.pem"), root).pathname], dir);
+    assertCrash(result, /ERR_MODULE_NOT_FOUND/, "a file missing from the package");
+    assert.match(result.stderr, /policy\.js/);
 });
 
 test("when several mistakes are made at once, the one reported is the first of a fixed order, and none of them connects", async (t) => {
