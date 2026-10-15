@@ -2393,10 +2393,10 @@ const CRASH_WHILE_CONNECTING = preload(`import tls from "node:tls"; const connec
 /**
  * Runs the command with something made to fail.
  * @param {string[]} args
- * @param {string} preloaded
+ * @param {string | string[]} preloaded One module for `--import`, or several.
  * @param {RunOptions} [options]
  */
-const crashing = (args, preloaded, options = {}) => run(args, { cwd: CWD, killAfterMs: 15_000, ...options, nodeArguments: ["--import", preloaded] });
+const crashing = (args, preloaded, options = {}) => run(args, { cwd: CWD, killAfterMs: 15_000, ...options, nodeArguments: [preloaded].flat().flatMap((url) => ["--import", url]) });
 
 /** @param {string} place */
 const bug = (place) => `new TypeError("a bug ${place}")`;
@@ -2675,21 +2675,37 @@ test("after a crash the process ends by itself: with standard input left open, w
     assert.ok(pending.ended < 5000, `took ${pending.ended} ms`);
 });
 
+/**
+ * Makes `util.inspect`, which the entry point imports by name, throw. With `onlyCustom` it throws
+ * only on the first attempt, the one that runs a custom inspector, as it would for a value whose own
+ * inspector fails. Whether the real one throws for a given value depends on the Node.js build, so the
+ * path that handles a throwing `inspect` is made by replacing it.
+ * @param {boolean} onlyCustom
+ */
+const brokenInspect = (onlyCustom) => preload(`import util from "node:util"; import { syncBuiltinESMExports } from "node:module"; const real = util.inspect; util.inspect = (value, options) => { if (${onlyCustom} && options?.customInspect === false) return real(value, options); throw new Error("inspect is broken"); }; syncBuiltinESMExports(); `);
+
 test("a value that can not be inspected is still reported and exits 4, and not the 7 of a handler that throws", async () => {
-    const custom = `{ [Symbol.for("nodejs.util.inspect.custom")]() { throw new Error("custom inspection failed"); } }`;
-    const stackGetter = `(() => { const error = new Error("stack getter"); Object.defineProperty(error, "stack", { get() { throw new Error("no stack"); } }); return error; })()`;
-    /** @type {[string, string, RegExp][]} */
-    const table = [
-        ["a custom inspector that throws, shown without it", custom, /nodejs\.util\.inspect\.custom/],
-        ["a getter of stack that throws", stackGetter, /^The thrown value cannot be shown: inspecting it throws too\.$/m],
+    // The error that arrives outside main() is raised while a file is still being read: help would already be printed.
+    /** @type {[string, string[], (expression: string) => string][]} */
+    const places = [
+        ["inside main()", ["inspect", "--help"], throwOnWrite],
+        ["outside main()", ["inspect", typed("leaf-p256.pem")], (expression) => throwFromListener(expression)],
     ];
-    for (const [name, value, pattern] of table) {
-        // Outside main() with a file, which is still being read when the error arrives: help would already be printed.
-        for (const [place, args, preloaded] of /** @type {[string, string[], string][]} */ ([
-            ["inside main()", ["inspect", "--help"], throwOnWrite(value)],
-            ["outside main()", ["inspect", typed("leaf-p256.pem")], throwFromListener(value)],
-        ])) {
-            assertCrash(await crashing(args, preloaded), pattern, `${name}, ${place}`);
+    for (const [place, args, raise] of places) {
+        // inspect fails on a custom inspector, so the value is shown the way it is without one.
+        const withoutCustom = await crashing(args, [raise("{ code: 'X' }"), brokenInspect(true)]);
+        assert.deepEqual([place, withoutCustom.code, withoutCustom.stdout, withoutCustom.stderr], [place, 4, "", "{ code: 'X' }\n"]);
+        // inspect fails whatever it is asked, so a fixed line says that the value can not be shown.
+        const nothing = await crashing(args, [raise("{ code: 'X' }"), brokenInspect(false)]);
+        assert.deepEqual([place, nothing.code, nothing.stdout, nothing.stderr], [place, 4, "", "The thrown value cannot be shown: inspecting it throws too.\n"]);
+
+        // Real values that make inspect throw on some builds of Node.js and not on others: either way
+        // there is a report and the exit code is 4.
+        const custom = `{ [Symbol.for("nodejs.util.inspect.custom")]() { throw new Error("custom inspection failed"); } }`;
+        const stackGetter = `(() => { const error = new Error("stack getter"); Object.defineProperty(error, "stack", { get() { throw new Error("no stack"); } }); return error; })()`;
+        for (const expression of [custom, stackGetter]) {
+            const result = await crashing(args, raise(expression));
+            assertCrash(result, /\S/, `${place}: ${expression.slice(0, 40)}`);
         }
     }
 });
