@@ -10,7 +10,7 @@ import {
 } from "../src/index.js";
 import { HOST_OPTIONS, fetchHost, hostRequestOf, refusalOf } from "./host.js";
 import { PathSyntaxError, labelOf, parsePath, printable, undeclaredAt, valueAt } from "./query.js";
-import { safe } from "./safe.js";
+import { perLine, safe } from "./safe.js";
 
 /** @import { Source } from "../src/index.js" */
 
@@ -45,6 +45,9 @@ const USAGE = `Usage: certdrift inspect [--json | --verbose | --quiet | --query 
 // PENDING: name `certdrift check` once that command exists
 // The help says "the checking command" until then, because naming a command that can not be run
 // yet would send people to something that fails.
+
+// PENDING: list exit code 1, "a check failed", in the exit codes below, once the checking command exists
+// Nothing exits with 1 until then, so listing it would describe a code that is never given.
 
 const HELP = `certdrift inspects X.509 certificates.
 
@@ -116,6 +119,8 @@ Exit codes:
      ambiguous (the candidates are listed).
   3  The file is missing or unreadable, the material is not a certificate, or the host cannot be
      reached, refuses the connection, does not speak TLS or does not answer in time.
+  4  The command crashed: an error it did not expect, which is a bug. The error is printed on
+     standard error as it is, even with --quiet.
 `;
 
 /**
@@ -127,9 +132,10 @@ Exit codes:
  */
 
 /**
- * Runs the command and gives its exit code. It never ends the process: `process.exit()` can cut
- * off output still waiting in a pipe, so the caller sets `process.exitCode` and lets Node.js
- * finish writing.
+ * Runs the command and gives its exit code. It never ends the process: ending it with a call can
+ * cut off output still waiting in a pipe, so the caller sets `process.exitCode` and lets Node.js
+ * finish writing. An unexpected error is not caught here: it leaves as it was thrown, and the
+ * caller decides what a crash looks like, so that no command has to decide what counts as one.
  * @param {string[]} argv The arguments after the executable.
  * @param {Io} io
  * @returns {Promise<number>}
@@ -292,15 +298,6 @@ async function readAll(stream) {
     const chunks = [];
     for await (const chunk of stream) chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
     return Buffer.concat(chunks);
-}
-
-/**
- * A message that is itself several lines, as the list of candidates is: the line breaks are the
- * library's own and stay, and what is inside each line is escaped.
- * @param {string} text
- */
-function perLine(text) {
-    return text.split("\n").map(safe).join("\n");
 }
 
 /**
