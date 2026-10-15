@@ -4,6 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import tls from "node:tls";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
+import { CHECK_OPTIONS } from "../bin/check.js";
 import { INSPECT_OPTIONS } from "../bin/cli.js";
 import { HOST_OPTIONS, fetchHost, hostFailure, hostRequestOf, refusalOf } from "../bin/host.js";
 import { safe } from "../bin/safe.js";
@@ -301,10 +302,11 @@ test("fetchHost gives the hint for an address without a server name, and not for
     assert.match(await messageOf(requestOf("192.0.2.1:443"), { names: { host: "host-b", servername: "servername-b", timeout: "timeout-b" } }), /try --servername-b <name>\.\n$/);
 });
 
-test("the three option definitions are written once and the options of inspect are composed from them", () => {
+test("the three option definitions are written once and the options of inspect and of check are composed from them", () => {
     assert.deepEqual(Object.keys(HOST_OPTIONS), ["host", "servername", "timeout"]);
     for (const name of /** @type {const} */ (["host", "servername", "timeout"])) {
         assert.equal(INSPECT_OPTIONS[name], HOST_OPTIONS[name], `inspect takes ${name} from HOST_OPTIONS`);
+        assert.equal(CHECK_OPTIONS[name], HOST_OPTIONS[name], `check takes ${name} from HOST_OPTIONS`);
         assert.deepEqual(HOST_OPTIONS[name], { type: "string", multiple: true }, name);
     }
     // No other file defines them: a definition is an object with the type and `multiple`.

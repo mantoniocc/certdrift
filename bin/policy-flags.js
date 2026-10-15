@@ -37,6 +37,36 @@ export const FLAGS = [
 export const ASKED = [{ flag: "key", entry: "matchesPrivateKey" }];
 
 /**
+ * The options that give an entry whose value the command reads from a file, not from the text of
+ * the option. They are not rows of `FLAGS`, which build their value from the text and give each
+ * entry to one flag, and they conflict like any flag that gives the entry.
+ * @type {readonly { flag: string, entry: string }[]}
+ */
+export const FROM_FILE = [{ flag: "expect-fingerprint-of", entry: "expectFingerprint" }];
+
+/**
+ * The options of `FROM_FILE` that were given.
+ * @param {Readonly<Record<string, unknown>>} given What `parseArgs` read.
+ */
+export function fromFileGiven(given) {
+    return FROM_FILE.filter(({ flag }) => given[flag] !== undefined);
+}
+
+/**
+ * The options that give an entry another option gives too. Two of them would fill one rule, and
+ * neither is the one meant, so each pair is refused.
+ * @param {Readonly<Record<string, unknown>>} given What `parseArgs` read.
+ * @returns {string[]} One line for each entry that has more than one option.
+ */
+export function sameEntry(given) {
+    const rows = [...FLAGS, ...FROM_FILE].filter(({ flag }) => given[flag] !== undefined);
+    return [...new Set(rows.map(({ entry }) => entry))].flatMap((entry) => {
+        const flags = rows.filter((row) => row.entry === entry).map(({ flag }) => `--${flag}`);
+        return flags.length > 1 ? [`${flags.join(" and ")} both give ${entry}: give only one of them`] : [];
+    });
+}
+
+/**
  * The entries the options ask for, among the ones that were given.
  * @param {Readonly<Record<string, unknown>>} given What `parseArgs` read.
  * @returns {string[]}
@@ -195,12 +225,17 @@ export function inactiveCodes(targets, present) {
  * without anyone seeing it, so each is refused, whatever its value.
  * @param {Readonly<Record<string, unknown>>} file
  * @param {Record<string, { value: unknown }>} entries From `entriesOf`.
+ * @param {readonly { flag: string, entry: string }[]} [fromFile] The options of `FROM_FILE` that were
+ *   given, whose entries are not in `entries` until their files are read.
  * @returns {string[]} One line for each.
  */
-export function conflicts(file, entries) {
-    return FLAGS.filter(({ entry }) => Object.hasOwn(entries, entry) && Object.hasOwn(file, entry)).map(
-        ({ flag, entry }) => `--${flag} gives ${entry}, which the policy file has: use --warn-only to soften a rule of the file, or take the entry out of one of them`,
-    );
+export function conflicts(file, entries, fromFile = []) {
+    return [
+        ...FLAGS.filter(({ entry }) => Object.hasOwn(entries, entry)),
+        ...fromFile,
+    ]
+        .filter(({ entry }) => Object.hasOwn(file, entry))
+        .map(({ flag, entry }) => `--${flag} gives ${entry}, which the policy file has: use --warn-only to soften a rule of the file, or take the entry out of one of them`);
 }
 
 /**

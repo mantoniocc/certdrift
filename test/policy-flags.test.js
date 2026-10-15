@@ -4,16 +4,19 @@ import { evaluate, inspect, policyProblems } from "../src/index.js";
 import {
     ALWAYS_ENTRIES,
     FLAGS,
+    FROM_FILE,
     conflicts,
     entriesOf,
     flagProblems,
     fingerprintOf,
     fractionOf,
+    fromFileGiven,
     inactiveCodes,
     mergePolicy,
     percentProblem,
     problemCount,
     problemLines,
+    sameEntry,
     warnTargets,
 } from "../bin/policy-flags.js";
 import { CHECK_OPTIONS } from "../bin/check.js";
@@ -160,6 +163,34 @@ test("a flag that gives an entry the file has is a conflict, whatever the values
     // An entry the file has and no flag gives, and a flag that is not given, are not conflicts.
     assert.deepEqual(conflicts({ contract: 1, expectKind: { value: "end-entity" }, rejectEku: { value: ["codeSigning"] } }, entries), []);
     assert.match(conflicts({ contract: 1, expectEku: {} }, entries)[0], /use --warn-only to soften a rule of the file/);
+});
+
+test("an option whose value comes from a file is not a row of FLAGS, is an option of check, and gives an entry that no other flag gives without being refused", () => {
+    assert.deepEqual(FROM_FILE, [{ flag: "expect-fingerprint-of", entry: "expectFingerprint" }]);
+    for (const { flag } of FROM_FILE) assert.deepEqual(CHECK_OPTIONS[/** @type {keyof typeof CHECK_OPTIONS} */ (flag)], { type: "string", multiple: true }, flag);
+    for (const { flag } of FROM_FILE) assert.equal(FLAGS.some((row) => row.flag === flag), false, `${flag} builds no value from its text`);
+    assert.deepEqual(fromFileGiven({ "expect-fingerprint-of": ["a.pem"] }), FROM_FILE);
+    assert.deepEqual(fromFileGiven({ "expect-fingerprint": ["ab"] }), []);
+    // Its text is a path, so no entry is built from it.
+    assert.deepEqual(entriesOf({ "expect-fingerprint-of": ["a.pem"] }), {});
+});
+
+test("two options that give one entry are refused, each pair on a line of its own, and one option or unrelated options are not", () => {
+    assert.deepEqual(sameEntry({}), []);
+    assert.deepEqual(sameEntry({ "expect-fingerprint": ["ab"] }), []);
+    assert.deepEqual(sameEntry({ "expect-fingerprint-of": ["a.pem"], "expires-within": ["30d"] }), []);
+    assert.deepEqual(sameEntry({ "expect-fingerprint": ["ab"], "expect-fingerprint-of": ["a.pem"] }), ["--expect-fingerprint and --expect-fingerprint-of both give expectFingerprint: give only one of them"]);
+});
+
+test("an option whose value comes from a file conflicts with the policy file as any flag does, and only when it was given", () => {
+    const file = { contract: 1, expectFingerprint: { value: "ab".repeat(32) } };
+    assert.deepEqual(conflicts(file, {}), [], "nothing was given");
+    assert.deepEqual(conflicts({ contract: 1 }, {}, FROM_FILE), []);
+    const lines = conflicts(file, {}, FROM_FILE);
+    assert.deepEqual(lines.map((line) => line.split(" gives ")[0]), ["--expect-fingerprint-of"]);
+    assert.match(lines[0], /^--expect-fingerprint-of gives expectFingerprint, which the policy file has: use --warn-only to soften a rule of the file/);
+    // The text option of the same entry still names itself.
+    assert.deepEqual(conflicts(file, entriesOf({ "expect-fingerprint": ["ab".repeat(32)] })).map((line) => line.split(" gives ")[0]), ["--expect-fingerprint"]);
 });
 
 test("the policy of a file and of the flags together changes neither, and --warn-only sets the severity of an entry, creating a validity entry that is missing", () => {

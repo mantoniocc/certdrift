@@ -165,15 +165,18 @@ async function readAll(stream) {
  * @param {Uint8Array} material
  * @param {Parameters<typeof inspect>[1]} options
  * @param {string} described What the messages call the material.
+ * @param {string} [choose] The line that ends the list of candidates, which says how to choose among
+ *   them. It is static text of the command, and says `--select` unless the material is read for
+ *   something `--select` does not reach.
  * @returns {{ observation: Observation } | { code: 2 | 3, message: string }}
  */
-export function observe(material, options, described) {
+export function observe(material, options, described, choose = "Use --select with the start of one sha256 to choose.") {
     try {
         return { observation: inspect(material, options) };
     } catch (error) {
         if (error instanceof ParseError) return { code: 3, message: `certdrift: ${safe(described)}: ${safe(error.message)}\n` };
         if (error instanceof AmbiguousTargetError) {
-            return { code: 2, message: `certdrift: ${safe(described)}: ${perLine(error.message)}\nUse --select with the start of one sha256 to choose.\n` };
+            return { code: 2, message: `certdrift: ${safe(described)}: ${perLine(error.message)}\n${choose}\n` };
         }
         throw error;
     }
