@@ -160,6 +160,11 @@ test("when several mistakes are made at once, check reports the first of a fixed
     const withFingerprint = written(dir, "fingerprint.json", `{"contract":1,"expectFingerprint":{"value":"${"ab".repeat(32)}"}}`);
     const twoLeaves = written(dir, "two-leaves.pem", fixture("bundle-two-leaves.pem"));
     const missing = join(dir, "missing");
+    // One missing path for each file an option names, so that the message says which was read first.
+    const missingPolicy = join(dir, "missing-policy.json");
+    const missingKey = join(dir, "missing.key");
+    const missingCertificate = join(dir, "missing.pem");
+    const cannotRead = (/** @type {string} */ path) => new RegExp(`^certdrift: cannot read ${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: `);
     const flagged = ["--reject-eku", "codeSigning"];
     const sha = "ab".repeat(32);
     /** @type {[string, string[], number, RegExp][]} */
@@ -185,9 +190,10 @@ test("when several mistakes are made at once, check reports the first of a fixed
         ["a target the module refuses before a key that is missing", ["--host", "a b", "--key", missing, ...flagged], 2, /^certdrift: target "a b" cannot be read: /],
         ["a target the module refuses before a fingerprint file that is missing", ["--host", "a b", "--expect-fingerprint-of", missing], 2, /^certdrift: target "a b" cannot be read: /],
         ["a server name the module refuses before a timeout it refuses", ["--host", host, "--servername", "192.0.2.1", "--timeout", "2147483648", ...flagged], 2, /^certdrift: options\.servername must be a host name in ASCII, not an IP address\n/],
-        ["a policy file that is missing before a key and a fingerprint file that are missing", ["--host", host, "--policy", missing, "--key", missing, "--expect-fingerprint-of", missing], 3, /^certdrift: cannot read .*missing: /],
+        ["a policy file that is missing before a key and a fingerprint file that are missing", ["--host", host, "--policy", missingPolicy, "--key", missingKey, "--expect-fingerprint-of", missingCertificate], 3, cannotRead(missingPolicy)],
         ["an option that conflicts with the policy file before a key that is missing", ["--host", host, "--policy", withFingerprint, "--expect-fingerprint-of", typed("leaf-p256.pem"), "--key", missing], 2, /^certdrift: .*fingerprint\.json: the options and the policy file give the same entry\n {2}--expect-fingerprint-of gives expectFingerprint, which the policy file has/],
-        ["a key that is missing before a fingerprint file that is missing", ["--host", host, "--policy", validPolicy, "--key", missing, "--expect-fingerprint-of", missing], 3, /^certdrift: cannot read .*missing: /],
+        ["a key that is missing before a fingerprint file that is missing", ["--host", host, "--policy", validPolicy, "--key", missingKey, "--expect-fingerprint-of", missingCertificate], 3, cannotRead(missingKey)],
+        ["a fingerprint file that is missing when the policy file and the key are read", ["--host", host, "--policy", validPolicy, "--key", typed("leaf-p256.key"), "--expect-fingerprint-of", missingCertificate], 3, cannotRead(missingCertificate)],
         ["a fingerprint file with two candidates before a host that cannot be reached", ["--host", `127.0.0.1:${await closedPort()}`, "--expect-fingerprint-of", twoLeaves], 2, /two-leaves\.pem: 2 certificates in the material sign no other one/],
         ["a fingerprint file that is missing before a host that cannot be reached", ["--host", `127.0.0.1:${await closedPort()}`, "--expect-fingerprint-of", missing], 3, /^certdrift: cannot read .*missing: /],
     ];
