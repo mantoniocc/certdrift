@@ -1,22 +1,29 @@
 import { readFile } from "node:fs/promises";
-import { parseArgs, styleText } from "node:util";
+import { serializeObservation, EXTENDED_KEY_USAGE_OIDS, outsideValidity } from "../src/index.js";
+import { CHECK_OPTIONS, checkCommand } from "./check.js";
 import {
-    inspect,
-    serializeObservation,
-    ParseError,
-    AmbiguousTargetError,
-    EXTENDED_KEY_USAGE_OIDS,
-    outsideValidity,
-} from "../src/index.js";
+    COLOUR_NOTE,
+    QUIET_ONLY,
+    colourOn,
+    misuseOf,
+    observe,
+    painter,
+    parseFlags,
+    readInput,
+    warningLines,
+    wantsQuiet,
+} from "./command.js";
 import { HOST_OPTIONS, fetchHost, hostRequestOf, refusalOf } from "./host.js";
 import { PathSyntaxError, labelOf, parsePath, printable, undeclaredAt, valueAt } from "./query.js";
-import { perLine, safe } from "./safe.js";
+import { safe } from "./safe.js";
 
 /** @import { Source } from "../src/index.js" */
+/** @import { Context, Io } from "./command.js" */
 
-// The command orchestrates and presents. Everything that interprets a certificate is in the
+// The commands orchestrate and present. Everything that interprets a certificate is in the
 // library, and every value shown here comes from the observation or from its exports, so what
-// the command does is what an import can do.
+// the commands do is what an import can do. This file chooses the command and holds `inspect`;
+// `check` is in check.js, and what both share is in command.js.
 
 /** The flags of `certdrift inspect`. */
 export const INSPECT_OPTIONS = /** @type {const} */ ({
@@ -42,14 +49,8 @@ const OBSERVATION_SCHEMA = { name: "observation", url: new URL("../schema/observ
 const USAGE = `Usage: certdrift inspect [--json | --verbose | --quiet | --query <path>] [--select <sha256>] <path | ->
        certdrift inspect [same options] [--servername <name>] [--timeout <ms>] --host <host[:port]>`;
 
-// PENDING: name `certdrift check` once that command exists
-// The help says "the checking command" until then, because naming a command that can not be run
-// yet would send people to something that fails.
-
-// PENDING: list exit code 1, "a check failed", in the exit codes below, once the checking command exists
-// Nothing exits with 1 until then, so listing it would describe a code that is never given.
-
-const HELP = `certdrift inspects X.509 certificates.
+// `inspect` never exits with 1, "a check failed", so its exit codes below do not list it.
+const INSPECT_HELP = `certdrift inspects X.509 certificates.
 
 ${USAGE}
 
@@ -90,8 +91,8 @@ Inspecting a server:
   milliseconds. It is 10000 unless given.
 
 Extracting a value:
-  To extract a value, use --query. To make a decision, use the checking command: --query only
-  reads, and a value that is missing is not a failure of the certificate.
+  To extract a value, use --query. To make a decision, use certdrift check: --query only reads,
+  and a value that is missing is not a failure of the certificate.
 
     certdrift inspect --query 'certificates[0].notAfter' server.pem
 
@@ -110,8 +111,7 @@ Extracting a value:
   The contract tolerates fields it does not declare, so an observation may hold one. A field the
   contract tolerates but the schema does not declare does not exist for --query.
 
-The output is coloured unless the NO_COLOR environment variable is set to a non-empty value.
-Nothing else, such as whether a terminal is attached, changes it.
+${COLOUR_NOTE}
 
 Exit codes:
   0  Success.
@@ -123,13 +123,25 @@ Exit codes:
      standard error as it is, even with --quiet.
 `;
 
-/**
- * @typedef {object} Io
- * @property {Record<string, string | undefined>} env
- * @property {AsyncIterable<string | Uint8Array>} stdin
- * @property {{ write(text: string): unknown, on(event: "error", listener: (error: Error & { code?: string }) => void): unknown }} stdout
- * @property {{ write(text: string): unknown, on(event: "error", listener: (error: Error & { code?: string }) => void): unknown }} stderr
- */
+const TOP_USAGE = `Usage: certdrift inspect [options] <path | ->
+       certdrift check [options] <path | ->`;
+
+const HELP = `certdrift inspects and checks X.509 certificates.
+
+Usage: certdrift <command> [options]
+
+Commands:
+  inspect  Print a certificate and the rest of its chain, or one value of them, from a file, from
+           standard input or from a server.
+  check    Decide whether a certificate meets requirements, given as options or as a policy file,
+           and exit 1 when one fails.
+
+Run certdrift inspect --help or certdrift check --help for the options, the output and the exit
+codes of one command.
+
+    certdrift inspect server.pem
+    certdrift check --expect-san api.example.com --expires-within 30d server.pem
+`;
 
 /**
  * Runs the command and gives its exit code. It never ends the process: ending it with a call can
@@ -149,39 +161,41 @@ export async function main(argv, { env, stdin, stdout, stderr }) {
         });
     }
 
+    const [command, ...rest] = argv;
     // Misuse is silent too: --quiet means nothing is printed, and the exit code is the answer.
-    // The arguments are read leniently here because they may be invalid in other ways.
-    const quiet = wantsQuiet(argv);
+    // Each command reads it with its own options, because a flag that takes a value takes the
+    // next argument, and before the command is known only --quiet itself is.
+    const quiet = wantsQuiet(argv, command === "inspect" ? INSPECT_OPTIONS : command === "check" ? CHECK_OPTIONS : QUIET_ONLY);
     const out = (/** @type {string} */ text) => { if (!quiet) stdout.write(text); };
     const err = (/** @type {string} */ text) => { if (!quiet) stderr.write(text); };
-    /** @param {string} message */
-    const misuse = (message) => {
-        err(`certdrift: ${safe(message)}\n${USAGE}\nRun certdrift --help for the options.\n`);
-        return 2;
-    };
+    /** @type {Context} */
+    const context = { env, stdin, out, err };
 
-    const [command, ...rest] = argv;
     if (command === "-h" || command === "--help") {
         out(HELP);
         return 0;
     }
+    if (command === "inspect") return inspectCommand(rest, context);
+    if (command === "check") return checkCommand(rest, context);
+    const misuse = misuseOf(err, TOP_USAGE, "Run certdrift --help for the commands.");
     if (command === undefined) return misuse("no command given");
-    if (command !== "inspect") return misuse(`unknown command ${JSON.stringify(command)}`);
+    return misuse(`unknown command ${JSON.stringify(command)}; the commands are inspect and check`);
+}
 
-    /** @type {ReturnType<typeof parseArgs<{ options: typeof INSPECT_OPTIONS, allowPositionals: true }>>} */
-    let parsed;
-    try {
-        parsed = parseArgs({ args: rest, options: INSPECT_OPTIONS, allowPositionals: true });
-    } catch (error) {
-        // Only the parser's own complaints are misuse; anything else is a bug and must show.
-        if (error instanceof Error && "code" in error && String(error.code).startsWith("ERR_PARSE_ARGS_")) {
-            return misuse(error.message.split("\n")[0]);
-        }
-        throw error;
-    }
+/**
+ * Runs `certdrift inspect`.
+ * @param {string[]} args The arguments after `inspect`.
+ * @param {Context} context
+ * @returns {Promise<number>}
+ */
+async function inspectCommand(args, { env, stdin, out, err }) {
+    const misuse = misuseOf(err, USAGE, "Run certdrift inspect --help for the options.");
+
+    const parsed = parseFlags(args, INSPECT_OPTIONS);
+    if ("misuse" in parsed) return misuse(parsed.misuse);
     const { values, positionals } = parsed;
     if (values.help) {
-        out(HELP);
+        out(INSPECT_HELP);
         return 0;
     }
     const asked = hostRequestOf(values, { pathGiven: positionals.length > 0 });
@@ -238,32 +252,20 @@ export async function main(argv, { env, stdin, stdout, stderr }) {
     } else {
         const [path] = positionals;
         source = path === "-" ? { kind: "stdin", ref: "-" } : { kind: "file", ref: path };
-        described = path === "-" ? "standard input" : path;
-        try {
-            material = path === "-" ? await readAll(stdin) : await readFile(path);
-        } catch (error) {
-            if (error instanceof Error && "code" in error) {
-                err(`certdrift: cannot read ${safe(described)}: ${safe(error.message)}\n`);
-                return 3;
-            }
-            throw error;
+        const read = await readInput(path, stdin);
+        if ("code" in read) {
+            err(read.message);
+            return read.code;
         }
+        ({ bytes: material, described } = read);
     }
 
-    let observation;
-    try {
-        observation = inspect(material, { source, ...(select === undefined ? {} : { select }) });
-    } catch (error) {
-        if (error instanceof ParseError) {
-            err(`certdrift: ${safe(described)}: ${safe(error.message)}\n`);
-            return 3;
-        }
-        if (error instanceof AmbiguousTargetError) {
-            err(`certdrift: ${safe(described)}: ${perLine(error.message)}\nUse --select with the start of one sha256 to choose.\n`);
-            return 2;
-        }
-        throw error;
+    const observed = observe(material, { source, ...(select === undefined ? {} : { select }) }, described);
+    if (!("observation" in observed)) {
+        err(observed.message);
+        return observed.code;
     }
+    const { observation } = observed;
 
     if (steps !== undefined) {
         // The value comes from the document --json prints, so the two can not disagree.
@@ -271,37 +273,12 @@ export async function main(argv, { env, stdin, stdout, stderr }) {
         if (found.found) out(printable(found.value));
         else err(`certdrift: no value for ${safe(query ?? "")}: ${safe(found.reason)}\n`);
     } else if (values.json) out(serializeObservation(observation));
-    else out(present(observation, { verbose: values.verbose === true, colour: !isSet(env.NO_COLOR) }));
+    else out(present(observation, { verbose: values.verbose === true, colour: colourOn(env) }));
     return 0;
 }
 
-/** @param {string[]} argv */
-function wantsQuiet(argv) {
-    try {
-        return Boolean(parseArgs({ args: argv, options: INSPECT_OPTIONS, allowPositionals: true, strict: false }).values.quiet);
-    } catch {
-        return false;
-    }
-}
-
 /**
- * NO_COLOR counts only when it has a value: no-color.org says an empty one is as good as unset.
- * @param {string | undefined} value
- */
-function isSet(value) {
-    return value !== undefined && value !== "";
-}
-
-/** @param {AsyncIterable<string | Uint8Array>} stream */
-async function readAll(stream) {
-    /** @type {Uint8Array[]} */
-    const chunks = [];
-    for await (const chunk of stream) chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-    return Buffer.concat(chunks);
-}
-
-/**
- * @typedef {ReturnType<typeof inspect>} Observation
+ * @typedef {import("../src/index.js").Observation} Observation
  * @typedef {Observation["certificates"][number]} Certificate
  */
 
@@ -313,8 +290,7 @@ async function readAll(stream) {
  * @param {{ verbose: boolean, colour: boolean }} options
  */
 export function present(observation, { verbose, colour }) {
-    /** @param {Parameters<typeof styleText>[0]} format @param {string} text */
-    const paint = (format, text) => (colour ? styleText(format, text, { validateStream: false }) : text);
+    const paint = painter(colour);
     const { certificates, target, warnings } = observation;
     const { at } = observation.observation;
     // Only the target is labelled. A server often keeps sending a cross-signed root that expired
@@ -333,12 +309,8 @@ export function present(observation, { verbose, colour }) {
         if (verbose) lines.pop();
     }
 
-    if (warnings.length > 0) {
-        lines.push("", paint("bold", "Warnings"));
-        for (const { code, certificate, message } of warnings) {
-            lines.push(`  ${paint("yellow", safe(code))}${certificate === null ? "" : ` [${certificate}]`} ${safe(message)}`);
-        }
-    }
+    const warned = warningLines(warnings, paint);
+    if (warned.length > 0) lines.push("", ...warned);
     return `${lines.join("\n")}\n`;
 }
 

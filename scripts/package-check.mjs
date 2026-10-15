@@ -28,6 +28,7 @@ import { expectedContents, holdsPrivateKey } from "./package-contents.mjs";
 const root = new URL("../", import.meta.url);
 const repository = fileURLToPath(root);
 const errorsOf = validatorFor("observation");
+const checkErrorsOf = validatorFor("check-result");
 const FIXTURES = ["leaf-p256.pem", "leaf-p256.der", "leaf-p256.key", "leaf-rsa.key"];
 const AT = new Date("2026-09-15T14:02:11Z");
 
@@ -415,6 +416,33 @@ test("the installed executable reads a DER file and standard input", async () =>
 
     const stdin = await run(command, ["inspect", "--query", "certificates[0].sha256", "-"], setup.consumer, readFileSync(join(setup.consumer, "leaf-p256.pem")));
     assert.deepEqual([stdin.code, stdin.stdout], [0, `${sha256}\n`], shown(stdin));
+});
+
+test("the installed executable checks a certificate against requirements, from options and from a policy file, and exits 1 when one fails", async () => {
+    const command = join(setup.consumer, "node_modules", ".bin", "certdrift");
+    const { certificates } = inspect(readFileSync(new URL("test/fixtures/leaf-p256.pem", root)), { at: AT });
+    const { notBefore, sha256 } = certificates[0];
+    const policyPath = join(setup.consumer, "policy.json");
+    writeFileSync(policyPath, '{"contract":1,"expectKind":{"value":"end-entity"}}');
+
+    // At the instant the certificate starts, whatever day the fixtures were made.
+    const passing = await run(command, ["check", "--json", "--as-of", notBefore, "--policy", "policy.json", "--expect-fingerprint", sha256.toUpperCase(), "--reject-eku", "codeSigning", "leaf-p256.pem"], setup.consumer);
+    assert.equal(passing.code, 0, shown(passing));
+    const printed = JSON.parse(passing.stdout);
+    assert.deepEqual(checkErrorsOf(printed), []);
+    assert.equal(printed.summary.status, "pass");
+    assert.deepEqual(printed.results.map((/** @type {{ code: string }} */ result) => result.code), ["NOT_YET_VALID", "EXPIRED", "EKU_FORBIDDEN", "FINGERPRINT_MISMATCH", "TARGET_NOT_END_ENTITY"]);
+
+    const failing = await run(command, ["check", "--as-of", notBefore, "--expect-eku", "codeSigning", "leaf-p256.pem"], setup.consumer);
+    assert.equal(failing.code, 1, shown(failing));
+    assert.match(failing.stdout, /^ {2}FAIL {2}expectEku +EKU_MISSING /m);
+    assert.match(failing.stdout, /\n1 failed · exit 1\n$/);
+
+    const help = await run(command, ["check", "--help"], setup.consumer);
+    assert.equal(help.code, 0, shown(help));
+    assert.match(help.stdout, /^certdrift check decides/);
+    const top = await run(command, ["--help"], setup.consumer);
+    assert.match(top.stdout, /^ {2}check {4}/m);
 });
 
 test("certdrift/tls imports from the installed package with its declarations, and fetches a chain from a local server that inspect() reads", async () => {

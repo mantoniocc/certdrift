@@ -8,9 +8,7 @@ It requires Node.js 24 or later and has no runtime dependencies. To run the type
 
 ## Extracting a value
 
-To extract a value, use `--query`. To make a decision, use the checking command. `--query` only reads: it never says whether a certificate is good.
-
-<!-- PENDING: name `certdrift check` once that command exists -->
+To extract a value, use `--query`. To make a decision, use `certdrift check`. `--query` only reads: it never says whether a certificate is good.
 
 ```sh
 certdrift inspect --query 'certificates[0].notAfter' server.pem
@@ -37,16 +35,88 @@ The certificates are exactly the ones the server sent, in the order it sent them
 
 A host that cannot be reached, one that refuses the connection, one that does not speak TLS and one that does not answer in time each exit with code 3, and the message says which. A server that sends several certificates that could each be the one the connection is about exits with code 2 listing them, and `--select` chooses, as it does for a file.
 
+## Checking a certificate
+
+`certdrift check` decides. It reads a certificate the way `inspect` does (a file, or standard input when the path is `-`, PEM or DER, a bundle with `--select` when several certificates could be the one it is about), applies requirements and prints one result for each. It exits with 1 when a result fails, so a script can act on it. A requirement that does not hold is a failed result, never an error of the command.
+
+```sh
+certdrift check --expect-san api.example.com --expires-within 30d server.pem
+```
+
+```text
+server.pem  checked at 2026-12-20T00:00:00Z
+  OK    validityStarted   NOT_YET_VALID  the certificate is valid from 2026-10-14T17:37:52Z
+  OK    validityNotEnded  EXPIRED        the certificate is valid until 2027-01-12T17:37:52Z
+  FAIL  expiresWithin     EXPIRES_SOON   23 days are left, below 30d
+  OK    expectSan         SAN_MISSING    the certificate lists every expected name
+
+1 failed · exit 1
+```
+
+The first line names what was checked and the instant the rules were evaluated at. Each line has the status (`OK`, `WARN` or `FAIL`), the name of the rule, the reason code and a message, and the observation's own warnings, such as `KIND_UNRELIABLE`, follow the results so that a rule that passes never hides what was said about the certificate it passed on. The last line says how many results failed and the exit code. Text that comes from a certificate or a file is escaped as `inspect` escapes it, and the output is coloured unless the `NO_COLOR` environment variable is set to a non-empty value. `--json` prints the check result of the section below, exactly as `serializeCheckResult` writes it, and nothing else on standard output. `--quiet` prints nothing and wins over `--json`.
+
+### Requirements
+
+Each option adds one rule to the policy that is applied. The validity of the certificate (`NOT_YET_VALID` and `EXPIRED`) is always checked.
+
+| Option | Rule | Takes |
+|---|---|---|
+| `--expect-eku <name\|OID>` | `expectEku` | a usage; repeatable |
+| `--eku-allows <name\|OID>` | `ekuAllows` | a usage; repeatable |
+| `--reject-eku <name\|OID>` | `rejectEku` | a usage; repeatable |
+| `--expect-san <name\|address>` | `expectSan` | a DNS name or an IP address; repeatable |
+| `--expect-fingerprint <sha256>` | `expectFingerprint` | 64 hexadecimal characters, in either case, or pairs separated by colons as `openssl` prints them |
+| `--expires-within <Nd\|Nh>` | `expiresWithin` | whole days or hours: `30d`, `72h` |
+| `--lifetime-used <N%>` | `maxLifetimeUsed` | a percentage from 0% to 100%: `66%`, `66.3%` |
+
+The command implements none of the rules: the options become a policy, `policyProblems` checks it and `evaluate` applies it, so what each rule decides is what the table of reason codes below says. `--lifetime-used 66.3%` is the threshold `0.663`, built from the digits of the text and not by dividing by a hundred, which in floating point gives a different number. A value that an option cannot take is exit 2, and the message names the option (and, for one that can be repeated, the value as it was typed), never a path inside a policy.
+
+`--select <sha256>` works as in `inspect`. A flag that takes one value and is given twice is misuse. `--help` (or `-h`) prints the options of the command.
+
+### Policy file and options
+
+`--policy <file>` reads a policy, a JSON document with `"contract": 1`, from a file, or from standard input with `-`. A file that cannot be opened, or that is not JSON, is exit 3. A file whose shape `policyProblems` refuses, a `contract` the tool does not know included, is exit 2, with each problem and its path. A byte order mark at the start of the file is ignored.
+
+The options add entries to the file. An option that gives an entry the file already has is exit 2 and says which, so that an option never changes a shared policy without anyone seeing it. `--warn-only <code>` is how a rule of the file, or of an option, is softened: it sets the severity of the entry that produces that reason code to `warn`, and a failure of that rule is then a `WARN` result that does not fail the check. The code must be that of a rule that is part of the run (the two validity rules always are). A code that does not exist, or whose rule is not checked, is exit 2: a mistyped code would otherwise leave failing a rule you believed softened.
+
+```sh
+certdrift check --policy policy.json --warn-only LIFETIME_USED_EXCEEDED server.pem
+certdrift check --policy policy.json --expect-fingerprint 2D:71:16:42:B7:26:B0:44:01:62:7C:A9:FB:AC:32:F5:C8:53:0F:B1:90:3C:C4:DB:02:25:87:17:92:1A:48:81 server.pem
+```
+
+With no requirement option and no `--policy` there is nothing to check, which is exit 2; `--warn-only` and `--as-of` alone do not count. A policy that has only `contract` is something to check, and gives the `POLICY_EMPTY` warning. The command is not given a private key, so a policy that lists `matchesPrivateKey` is exit 2.
+
+If a policy file repeats an entry, as `{"expectEku": …, "expectEku": …}`, only the last one is read, as with any JSON.
+
+### The instant
+
+`--as-of <date>` evaluates the rules at another instant than now. It is `YYYY-MM-DD`, which is that day at 00:00:00 UTC, or a timestamp in the form the contract writes, with the `Z`. Anything else, a date that does not exist such as `2026-02-30`, and a year outside 0 to 9999 is exit 2. It never changes the observation's `at`, and the first line of the readable output says the instant used.
+
+```sh
+certdrift check --as-of 2026-03-01 --expect-eku serverAuth server.pem
+```
+
+### Reading from standard input
+
+```sh
+certdrift check --json --reject-eku codeSigning - < server.pem
+```
+
+`-` is the certificate, or the policy with `--policy -`, but not both: standard input is read once.
+
+### Exit codes of `check`
+
+`0` when no result fails (a warning does not), `1` when one does, `2` for misuse, an invalid policy or an ambiguous bundle, `3` when the certificate or the policy file cannot be read or the material is not a certificate, and `4` when the command crashes. The table below has them all.
+
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | Success. |
+| `0` | Success. For `certdrift check`, no result failed. |
+| `1` | A check failed: `certdrift check` has a result that is `FAIL`. `inspect` never gives it. |
 | `2` | Misuse, a `--query` path the schema does not declare, or a bundle whose certificate is ambiguous (the candidates are listed). |
-| `3` | The file is missing or unreadable, the material is not a certificate, or the host cannot be reached, refuses the connection, does not speak TLS or does not answer in time. |
+| `3` | The file is missing or unreadable (the policy file of `check` too), the policy file is not JSON, the material is not a certificate, or the host cannot be reached, refuses the connection, does not speak TLS or does not answer in time. |
 | `4` | The command crashed: an error it did not expect, which is a bug. The error is printed on standard error as it is, even with `--quiet`. |
-
-<!-- PENDING: list exit code 1, "a check failed", in this table once the checking command exists. Nothing exits with 1 until then, so listing it would describe a code that is never given. -->
 
 A fault that kills Node.js with a signal cannot be caught, and the shell then reports a code of its own, for example 134 or 139.
 
