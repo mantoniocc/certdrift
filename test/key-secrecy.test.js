@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createPrivateKey } from "node:crypto";
 import { PolicyError, evaluate as evaluateObservation, serializeCheckResult } from "../src/index.js";
 import { evaluate, observed, policyOf } from "./helpers/evaluation.js";
-import { PASSPHRASE, bodyLines, matchesPrivateKey, observationOf, text } from "./helpers/keys.js";
+import { PASSPHRASE, bodyLines, matchesPrivateKey, observationOf, piecesOf, text } from "./helpers/keys.js";
 
 // The key and the passphrase never appear in a result, in a message, in a PolicyError, in a
 // TypeError or anywhere `evaluate` or `matchesPrivateKey` returns or throws. For each case below,
@@ -12,15 +12,6 @@ import { PASSPHRASE, bodyLines, matchesPrivateKey, observationOf, text } from ".
 
 const P256 = observationOf("leaf-p256.pem");
 const WRONG_PASSPHRASE = "hunter2-wrong-passphrase";
-
-/**
- * Pieces of a key's body that nothing public repeats: every line of base64, and a slice of the
- * middle of each, which is what a message that quotes part of a line would hold.
- * @param {string} key
- */
-function piecesOf(key) {
-    return bodyLines(key).flatMap((line) => (line.length >= 16 ? [line, line.slice(4, 20)] : []));
-}
 
 /**
  * Everything an error says: its name, message and stack, its text, each property it carries, and its cause.

@@ -51,6 +51,15 @@ export function bodyLines(pem) {
 }
 
 /**
+ * Pieces of a key's body that nothing public repeats: every line of base64, and a slice of the
+ * middle of each, which is what a message that quotes part of a line would hold.
+ * @param {string} key
+ */
+export function piecesOf(key) {
+    return bodyLines(key).flatMap((line) => (line.length >= 16 ? [line, line.slice(4, 20)] : []));
+}
+
+/**
  * A PEM block around some body.
  * @param {string} label
  * @param {string} [body]

@@ -120,9 +120,28 @@ export function misuseOf(err, usage, hint) {
  * @returns {Promise<{ bytes: Uint8Array, described: string } | { code: 3, message: string }>}
  */
 export async function readInput(path, stdin) {
-    const described = path === "-" ? "standard input" : path;
+    if (path !== "-") return readPath(path);
+    return reading("standard input", () => readAll(stdin));
+}
+
+/**
+ * What is read from a file, and never from standard input: `-` is a file called `-` here. A
+ * command that must not read standard input for an option reads it through this.
+ * @param {string} path
+ * @returns {Promise<{ bytes: Uint8Array, described: string } | { code: 3, message: string }>}
+ */
+export function readPath(path) {
+    return reading(path, () => readFile(path));
+}
+
+/**
+ * @param {string} described
+ * @param {() => Promise<Uint8Array>} read
+ * @returns {Promise<{ bytes: Uint8Array, described: string } | { code: 3, message: string }>}
+ */
+async function reading(described, read) {
     try {
-        return { bytes: path === "-" ? await readAll(stdin) : await readFile(path), described };
+        return { bytes: await read(), described };
     } catch (error) {
         if (error instanceof Error && "code" in error) {
             return { code: 3, message: `certdrift: cannot read ${safe(described)}: ${safe(error.message)}\n` };
