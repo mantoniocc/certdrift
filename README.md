@@ -111,7 +111,7 @@ const result = evaluate(observation, policy, {
 console.log(result.summary.status, serializeCheckResult(result));
 ```
 
-Every rule is about the certificate the observation targets. The result has one entry per rule, in the order of the policy table above (the two validity rules always, the others when the policy lists them), then the rules of your own in the order given, then `POLICY_EMPTY` if the policy lists nothing else and no rule of your own was given. `summary.status` is `fail` when any result is `fail`, otherwise `warn` when any is `warn`, otherwise `pass`.
+Every rule is about the certificate the observation targets. The result has one entry per rule, in the order of the policy table above (the two validity rules always, the others when the policy lists them, and `matchesPrivateKey` also when `options.privateKey` is given), then the rules of your own in the order given, then `POLICY_EMPTY` if the policy lists nothing else and no rule of your own was given. `summary.status` is `fail` when any result is `fail`, otherwise `warn` when any is `warn`, otherwise `pass`.
 
 `options.now` is a `Date` or a timestamp in the form the contract writes, and it defaults to the observation's `at`. The result records it cut to the whole second, and the observation's `at` is not changed. A `now` that is not an instant, or that falls outside the years 0 to 9999, which the result could not write, is a `TypeError`.
 
@@ -119,11 +119,49 @@ Every rule is about the certificate the observation targets. The result has one 
 
 The code of a rule of your own is any code of capital letters, digits and underscores starting with a letter, including the codes of the library's rules: its `rule.name` says which rule produced a result, and the library may add codes in a later version. Only `POLICY_EMPTY`, which exists with `rule: null`, and `RULE_ERROR` are the library's alone. A rule that throws, that returns a promise or anything that is not a result, that returns one of those two codes, or that returns an `actual`, an `expected` or a `rule.value` that cannot be written as JSON (a function, a BigInt, `NaN`, a value that contains itself or is nested more than 100 levels) gets a `RULE_ERROR` result with status `fail` under its name, and the check goes on. Its message says which of these it was and never repeats the text of the error the rule threw.
 
-`evaluate` never throws because a rule failed. It throws `PolicyError` when the policy is not valid, with the problems `policyProblems` lists in its `problems` property, and also when the policy lists `matchesPrivateKey`, whose rule needs a private key that `evaluate` is not given: that problem has the path `/matchesPrivateKey`. The message says how many problems there are and never quotes a value of the policy. A wrong call is a `TypeError`: an `observation` the rules cannot read, a `now` that is not an instant, or `options.rules` that is not a list of functions.
+`options.privateKey` is `{ material, passphrase }`, the private key a file holds, and asks for the rule `matchesPrivateKey` (see below): it is evaluated even when the policy does not list it, with severity `fail`, and the applied policy in the result shows the entry. When the policy lists it, the entry's severity is the one used. The key is read by that rule alone: it is not copied, a rule of your own is never given it, and neither it nor the passphrase is in the result.
+
+`evaluate` never throws because a rule failed. It throws `PolicyError` when the policy is not valid, with the problems `policyProblems` lists in its `problems` property, and also when the policy lists `matchesPrivateKey` and no `options.privateKey` is given, because that rule needs a private key: that problem has the path `/matchesPrivateKey`. The message says how many problems there are and never quotes a value of the policy. A wrong call is a `TypeError`: an `observation` the rules cannot read, a `now` that is not an instant, `options.rules` that is not a list of functions, or an `options.privateKey` that is not an object with a `material` that is text or bytes and a `passphrase` that is text.
 
 Nothing the caller passed is modified, and nothing in the result is shared with it. A rule of your own gets the observation frozen all the way down, so it cannot change what the next rule or the result sees. The same arguments always give the same result: `evaluate` does not read the clock. The messages of a result can hold text that comes from a certificate (a name in the SAN, a usage), and the library does not escape it: whoever prints it does.
 
 `entryOfCode(code)` gives the entry of the policy that produces a reason code, `"validityNotEnded"` for `EXPIRED`, and `null` for a code that has no entry: `POLICY_EMPTY`, `RULE_ERROR` and a code this version does not know. It answers for the library's codes. A rule of your own may give one of them too, so a program that has results from both looks at `rule.name` before asking for the entry.
+
+### Matching a private key
+
+`matchesPrivateKey(observation, privateKey, options)` says whether a private key is the key of the certificate an observation targets, which is what a person wants to know before installing a renewed certificate. It gives one result, for the rule `matchesPrivateKey`, in the shape of any result.
+
+```js
+import { inspect, matchesPrivateKey } from "certdrift";
+
+const observation = inspect(certificatePem);
+const result = matchesPrivateKey(observation, { material: keyPem, passphrase: "…" }, { severity: "fail" });
+console.log(result.code, result.status, result.message);
+```
+
+`privateKey` is `{ material, passphrase }`. `material` is the text or the bytes of the key's file, and `passphrase` is optional text, for a key that is encrypted. An empty string is a passphrase. The library never reads a file: whoever calls it does. Only PEM is read, so a DER file or a PKCS#12 file is a key that could not be read. `options.severity` is `fail` unless it says `warn`, and any other value is a `TypeError`. `evaluate` takes the same object as `options.privateKey`.
+
+The key matches when the SHA-256 of the public key derived from it, as SubjectPublicKeyInfo DER, is the target's `spkiSha256`. A key that was read gives `KEY_MISMATCH`: `pass` when it matches, and the status of the severity when it does not, with the SHA-256 of the key's public key as `actual` and the target's `spkiSha256` as `expected`, both public. A key that could not be read gives `KEY_UNREADABLE`, with the status of the severity and no `actual` or `expected`, and a message that says why. The message is fixed text for each reason, and it starts with `the private key could not be read: `:
+
+| Reason | The message goes on |
+|---|---|
+| the file holds a certificate | `the file holds a certificate` |
+| the file holds a public key | `the file holds a public key` |
+| the file holds no private key | `the file holds no private key` |
+| the key is encrypted and no passphrase was given | `it is encrypted and no passphrase was given` |
+| the key is encrypted and was not decrypted | `it could not be decrypted with the passphrase given` |
+| the file holds more than one private key | `the file holds more than one private key` |
+| anything else: the format or the algorithm is not supported, or the key is damaged | `its format or algorithm is not supported, or the key is damaged` |
+
+The reason is chosen from the PEM labels of the file, never from the error Node.js gives, because Node.js gives the same one for a certificate, a public key, an empty file and a truncated key, and the codes change between versions, and never from anything inside a block. When a file fits several reasons, the first that applies is the one:
+
+1. A file with more than one private key block is `more than one`, even when the first is encrypted and cannot be read: Node.js uses the first key of a file and says nothing of the others. A private key block is a line `-----BEGIN <label>-----` whose label ends in `PRIVATE KEY` (`PRIVATE KEY`, `RSA PRIVATE KEY`, `EC PRIVATE KEY`, `DSA PRIVATE KEY`, `ENCRYPTED PRIVATE KEY`, and also `OPENSSH PRIVATE KEY`, which Node.js cannot read), so a key that Node.js skips next to one it reads is more than one, and a block cut short counts as one block. The line has to start a line, as Node.js requires, and ends with `\n`, optionally after white space.
+2. With one private key block, a certificate or a public key or text before or after it is skipped, as Node.js skips it, so a file that holds a chain and its key is accepted. If the key cannot be read, the reason is `encrypted and no passphrase` when the block is encrypted (its label is `ENCRYPTED PRIVATE KEY`, or the first line after the BEGIN line is `Proc-Type: 4,ENCRYPTED`) and no passphrase was given; `could not be decrypted` when it is encrypted and one was given, whether it is wrong or the key is damaged, because the two cannot be told apart without the error code; and `anything else` otherwise.
+3. With no private key block, `certificate` when a block's label ends in `CERTIFICATE` (`CERTIFICATE`, `X509 CERTIFICATE`, `TRUSTED CERTIFICATE`), then `public key` when it ends in `PUBLIC KEY` (`PUBLIC KEY`, `RSA PUBLIC KEY`), whatever their order. Otherwise `no private key`, unless the file is not text (it holds a control character other than tab and line ends, or bytes that are not UTF-8, as a DER or a PKCS#12 file does), which is `anything else`.
+
+A key without encryption loads with any passphrase, wrong or empty, so a passphrase given for one is harmless. A `material` that is neither text nor bytes (a `Buffer` and a `Uint8Array` are bytes) and a `passphrase` that is not text are a `TypeError` that never quotes them, and so is an observation with no target that has a `spkiSha256`. No error of Node.js leaves the function.
+
+The key and the passphrase are not in the result, in a message or in an error, whatever the call gives. They are read by `createPrivateKey` and nowhere else, and the key object lives until Node.js collects it. Decrypting is synchronous, and a key encrypted with costly parameters takes as long as they say.
 
 ### The check result
 
@@ -169,7 +207,7 @@ Codes are versioned with the contract: adding a code is additive, and changing w
 | `FINGERPRINT_MISMATCH` | `expectFingerprint` | the target's `sha256` is the expected one | it is not | the target's `sha256` / the expected one |
 | `TARGET_NOT_END_ENTITY` | `expectKind` | the target's `kind` is `end-entity` | it is any other kind | `kind` / `end-entity` |
 | `KEY_MISMATCH` | `matchesPrivateKey` | a private key was read and corresponds to the target's public key | a key was read and does not | the SPKI SHA-256 of the key's public key / the target's `spkiSha256` |
-| `KEY_UNREADABLE` | `matchesPrivateKey` | never: a key that can be read gives `KEY_MISMATCH` | the key could not be read: its format, encrypted with no passphrase, or an algorithm that is not supported | none |
+| `KEY_UNREADABLE` | `matchesPrivateKey` | never: a key that can be read gives `KEY_MISMATCH` | the key could not be read: the file holds a certificate, a public key or no private key or more than one, its format or algorithm is not supported, it is encrypted with no passphrase or the passphrase does not decrypt it. The reasons are in "Matching a private key" | none |
 | `POLICY_EMPTY` | none | never | the policy has no entry besides the two validity ones and no rule of your own is given. Always `warn`, and `rule` is `null` | none |
 | `RULE_ERROR` | none | never | a rule of your own threw, returned a promise or something that is not a result, returned `POLICY_EMPTY` or `RULE_ERROR`, or returned an `actual`, an `expected` or a `rule.value` that JSON cannot hold. Always `fail`, and `rule` is `{ name }` with the name of the rule that failed | none |
 

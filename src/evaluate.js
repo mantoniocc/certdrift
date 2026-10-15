@@ -3,6 +3,7 @@ import { instant, timestampOf } from "./derived.js";
 import { PolicyError } from "./errors.js";
 import { copyJson, dataOf, isPlain } from "./json.js";
 import { ENTRIES, policyProblems } from "./policy.js";
+import { assertSpki, privateKeyOf } from "./private-key.js";
 import { RULES } from "./rules.js";
 
 /** @import { CheckResult, Observation, Result } from "./index.js" */
@@ -33,16 +34,21 @@ const CODE = /^[A-Z][A-Z0-9_]*$/;
  * A rule of the caller's own that gives anything else (a function, a BigInt, `NaN`, a value that
  * contains itself) is answered by a `RULE_ERROR` result under its name, and the check goes on.
  *
+ * With `options.privateKey` the rule `matchesPrivateKey` is evaluated, whether the policy lists it
+ * or not (with severity `fail` unless it does). The key and its passphrase are read by that rule
+ * alone: they are not copied, not given to a rule of the caller's own and not in the result.
+ *
  * @param {Observation} observation As `inspect()` returns it.
  * @param {import("./index.js").Policy} policy A valid policy, as `policyProblems` says. The entry
- *   `matchesPrivateKey` needs a private key that this function cannot be given, so a policy that
- *   lists it is refused.
+ *   `matchesPrivateKey` needs a private key, so a policy that lists it is refused unless
+ *   `options.privateKey` is given.
  * @param {import("./index.js").EvaluateOptions} [options]
  * @returns {CheckResult}
- * @throws {PolicyError} The policy is not valid, or it lists `matchesPrivateKey`. `problems` says
- *   what is wrong and where.
+ * @throws {PolicyError} The policy is not valid, or it lists `matchesPrivateKey` and no key is
+ *   given. `problems` says what is wrong and where.
  * @throws {TypeError} `observation` is not an observation this function can read, `options.now`
- *   is not an instant between the years 0 and 9999, or `options.rules` is not a list of functions.
+ *   is not an instant between the years 0 and 9999, `options.rules` is not a list of functions, or
+ *   `options.privateKey` is not a `{ material, passphrase }` with text or bytes and text.
  */
 export function evaluate(observation, policy, options) {
     if (options !== undefined && (typeof options !== "object" || options === null)) {
@@ -52,22 +58,25 @@ export function evaluate(observation, policy, options) {
     // make the names, the instant and the rules disagree.
     const givenNow = options?.now;
     const own = ownRulesOf(options?.rules);
-    const { copy, frozen, target, at } = observationOf(observation);
+    const givenKey = options?.privateKey;
+    const key = givenKey === undefined ? undefined : privateKeyOf(givenKey, "options.privateKey");
+    const { copy, frozen, target, at } = observationOf(observation, key !== undefined);
 
     const now = givenNow === undefined ? at : instant(givenNow, "options.now");
     const nowText = timestampOf(now, "options.now");
-    const read = policyOf(policy);
+    const read = policyOf(policy, key !== undefined);
 
     /** @type {Result[]} */
     const results = [];
     /** @type {Record<string, unknown>} */
     const applied = { contract: 1 };
     let listed = 0;
-    // `matchesPrivateKey` is in ENTRIES and has no rule here: a policy that lists it was refused
-    // above, so it is never present, and it is not one of the entries that are always evaluated.
     for (const [entry, kind, [code]] of ENTRIES) {
         const always = ALWAYS.includes(entry);
-        if (read[entry] === undefined && !always) continue;
+        // A key asks for its rule, which a policy that does not list it gets with severity `fail`.
+        // A policy that lists it without a key was refused above.
+        const asked = entry === "matchesPrivateKey" && key !== undefined;
+        if (read[entry] === undefined && !always && !asked) continue;
         if (!always) listed += 1;
 
         const written = /** @type {{ value?: unknown, severity?: string }} */ (read[entry] ?? {});
@@ -82,15 +91,20 @@ export function evaluate(observation, policy, options) {
             now,
             nowText,
             value: written.value,
+            privateKey: key,
         });
-        results.push({
-            code,
+        // The entry's first code is the one of a rule that has only one. A rule with more says
+        // which it found.
+        /** @type {Result} */
+        const result = {
+            code: found.code ?? code,
             status: found.holds ? "pass" : severity,
             rule: hasValue ? { name: entry, value: clone(written.value) } : { name: entry },
             message: found.message,
-            actual: clone(found.actual),
-            expected: clone(found.expected),
-        });
+        };
+        if (found.actual !== undefined) result.actual = clone(found.actual);
+        if (found.expected !== undefined) result.expected = clone(found.expected);
+        results.push(result);
     }
 
     for (const rule of own) results.push(run(rule, frozen, nowText));
@@ -138,11 +152,12 @@ function clone(value) {
  * what the rules decide on is what was checked even if the policy is an object that answers
  * differently each time it is read.
  * @param {unknown} given
+ * @param {boolean} hasKey Whether a private key was given, which `matchesPrivateKey` needs.
  * @returns {Record<string, unknown>} The entries the policy lists, each with only the properties this
  *   version reads.
  * @throws {PolicyError}
  */
-function policyOf(given) {
+function policyOf(given, hasKey) {
     let problems = policyProblems(given);
     /** @type {Record<string, unknown>} */
     let read = {};
@@ -156,7 +171,7 @@ function policyOf(given) {
         }
     }
     // Reported with the other problems, so that fixing the policy takes one pass.
-    if (listsPrivateKey(given) && !problems.some((problem) => problem.path === "/matchesPrivateKey")) {
+    if (!hasKey && listsPrivateKey(given) && !problems.some((problem) => problem.path === "/matchesPrivateKey")) {
         problems = [...problems, { path: "/matchesPrivateKey", message: "needs a private key, and none is given" }];
     }
     if (problems.length > 0) throw new PolicyError(problems);
@@ -215,10 +230,11 @@ function listsPrivateKey(given) {
  * checked is whether a rule could read it, so a wrong value is an error that names it and not a
  * wrong verdict.
  * @param {unknown} given
+ * @param {boolean} hasKey Whether a private key was given, which reads `spkiSha256`.
  * @returns {{ copy: unknown, frozen: unknown, target: { certificate: unknown, notBefore: number, notAfter: number }, at: number }}
  * @throws {TypeError}
  */
-function observationOf(given) {
+function observationOf(given, hasKey) {
     if (typeof given !== "object" || given === null || Array.isArray(given)) {
         throw new TypeError("observation must be an object");
     }
@@ -245,6 +261,8 @@ function observationOf(given) {
     if (!isPlain(certificate.san) || !strings(certificate.san.dns) || !strings(certificate.san.ip)) {
         throw new TypeError(`${name}.san must hold dns and ip as lists of strings`);
     }
+
+    if (hasKey) assertSpki(certificate.spkiSha256, name);
 
     const frozen = /** @type {{ ok: true, value: unknown }} */ (copyJson(copy.value, { freeze: true }));
     return { copy: copy.value, frozen: frozen.value, target: { certificate, notBefore, notAfter }, at };
