@@ -53,7 +53,7 @@
         "name": "expectKind",
         "value": "end-entity"
       },
-      "message": "the target is a ca certificate, not an end-entity one",
+      "message": "the target's kind is ca, not end-entity",
       "actual": "ca",
       "expected": "end-entity"
     }

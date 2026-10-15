@@ -6,7 +6,7 @@ import { subjectAltNames } from "./san.js";
 import { commonName, distinguishedName } from "./names.js";
 import { extendedKeyUsage } from "./usage.js";
 import { publicKeyOf } from "./key.js";
-import { derivedOf } from "./derived.js";
+import { derivedOf, timestampOf } from "./derived.js";
 import { validityDate } from "./dates.js";
 import { kindWarning } from "./kind-warning.js";
 
@@ -128,12 +128,10 @@ function instantOf(given) {
     if (!types.isDate(date) || Number.isNaN(date.getTime())) {
         throw new TypeError("options.at must be a valid Date");
     }
-    const whole = new Date(Math.floor(date.getTime() / 1000) * 1000);
-    // Outside years 0 to 9999 toISOString() writes a signed six-digit year, which the contract rejects.
-    if (!/^\d{4}-/.test(whole.toISOString())) {
-        throw new TypeError("options.at must fall between the years 0 and 9999");
-    }
-    return whole;
+    const seconds = Math.floor(date.getTime() / 1000);
+    // The instant is written out, so the years the contract can write are the years it may have.
+    timestampOf(seconds, "options.at");
+    return new Date(seconds * 1000);
 }
 
 /**

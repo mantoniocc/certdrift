@@ -1,8 +1,9 @@
 export { inspect } from "./inspect.js";
 export { serializeObservation, serializeCheckResult } from "./serialize.js";
 export { outsideValidity } from "./derived.js";
-export { policyProblems } from "./policy.js";
-export { ParseError, AmbiguousTargetError } from "./errors.js";
+export { policyProblems, entryOfCode } from "./policy.js";
+export { evaluate } from "./evaluate.js";
+export { ParseError, AmbiguousTargetError, PolicyError } from "./errors.js";
 export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 
 // The types of the package's public API. They are declared here, in the entry point, and not
@@ -12,7 +13,9 @@ export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 // from outside the package. Declared here, it writes `import("certdrift").Observation`. Only
 // the types a consumer needs to name are declared here: `DistinguishedName` and
 // `SubjectAltNames` are there because `subject`, `issuer` and `san` cannot be named without
-// them, and `PolicyProblem` because `policyProblems()` returns a list of them. The shapes of
+// them, `PolicyProblem` because `policyProblems()` returns a list of them, and `Rule` and
+// `EvaluateOptions` because a rule of the caller's own and the options of `evaluate()` have to be
+// written down by whoever passes them. The shapes of
 // `key`, `derived` and `observation` are written inline by the compiler.
 // Adding a type here is additive for the people who use the package; removing or renaming one
 // is not.
@@ -130,4 +133,22 @@ export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
  * @typedef {object} PolicyProblem
  * @property {string} path Where, as a JSON Pointer (RFC 6901): "" is the policy itself.
  * @property {string} message What is wrong, in English.
+ */
+
+/**
+ * A rule of the caller's own, passed to `evaluate` in `options.rules`. It gets the observation,
+ * frozen all the way down, and `now`, the timestamp the result records. It answers at once: a
+ * promise is not a result. What it returns is a result as above, except that `rule` may be left out
+ * (`evaluate` writes `{ name }` with the function's name, or `rule-<n>` for an anonymous one). A rule
+ * that throws, or returns something else, gives a `RULE_ERROR` result under its name. `POLICY_EMPTY`
+ * and `RULE_ERROR` are the library's own codes, and a rule that returns one gets `RULE_ERROR`.
+ * @typedef {(observation: Observation, now: string) => { code: string, status: "pass" | "fail" | "warn", rule?: { name: string, value?: unknown } | null, message: string, actual?: unknown, expected?: unknown }} Rule
+ */
+
+/**
+ * @typedef {object} EvaluateOptions
+ * @property {Date | string} [now] The instant to evaluate at, as a `Date` or a timestamp in the form
+ *   the contract writes. It defaults to the observation's `at`, and is recorded cut to the whole second.
+ * @property {readonly Rule[]} [rules] Rules of the caller's own, evaluated after the policy's in the
+ *   order given.
  */

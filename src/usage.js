@@ -15,6 +15,16 @@ export const EXTENDED_KEY_USAGE_OIDS = Object.freeze({
 const NAMES = new Map(Object.entries(EXTENDED_KEY_USAGE_OIDS).map(([name, oid]) => [oid, name]));
 
 /**
+ * The name the observation gives a usage: its name when the contract has one for the OID, the OID
+ * itself otherwise. A usage in a policy is read the same way, so an OID and its name are one usage.
+ * @param {string} usage A name or an OID as dotted text.
+ * @returns {string}
+ */
+export function usageName(usage) {
+    return NAMES.get(usage) ?? usage;
+}
+
+/**
  * The extended key usages of a certificate, sorted. Node.js exposes them as `keyUsage`, a
  * misleading name: the OIDs are those of the Extended Key Usage extension, and the property is
  * `undefined` when the extension is absent, which is `null` here. An extension that is present
@@ -27,5 +37,5 @@ const NAMES = new Map(Object.entries(EXTENDED_KEY_USAGE_OIDS).map(([name, oid]) 
  */
 export function extendedKeyUsage(oids) {
     if (oids === undefined) return null;
-    return oids.map((oid) => NAMES.get(oid) ?? oid).sort();
+    return oids.map(usageName).sort();
 }

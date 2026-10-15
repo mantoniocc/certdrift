@@ -93,9 +93,12 @@ export function outsideValidity(notBefore, notAfter, now) {
  * the method to answer anything, and a comparison with something that is not a number is false
  * both ways, which would read as a current validity.
  * @param {unknown} value
- * @param {string} name
+ * @param {string} name What the value is, for the message.
+ * @returns {number} Whole seconds since the epoch, rounded down: `Math.floor` moves an instant
+ *   before 1970 back, where `Math.trunc` would move it forward.
+ * @throws {TypeError} The value is not a valid instant.
  */
-function instant(value, name) {
+export function instant(value, name) {
     const date = typeof value === "string" ? new Date(value) : value;
     const time = types.isDate(date) ? Date.prototype.getTime.call(date) : Number.NaN;
     const valid =
@@ -104,4 +107,19 @@ function instant(value, name) {
             : Number.isFinite(time);
     if (!valid) throw new TypeError(`${name} must be a valid Date or a timestamp such as 2026-09-15T14:02:11Z`);
     return Math.floor(time / 1000);
+}
+
+/**
+ * The contract's timestamp for an instant given as whole seconds since the epoch: ISO 8601 in UTC,
+ * with no fraction. The contract's pattern has four digits for the year, so an instant outside the
+ * years 0 to 9999, which `toISOString()` writes with a signed six-digit year, cannot be written.
+ * @param {number} seconds
+ * @param {string} name What the instant is, for the message.
+ * @returns {string}
+ * @throws {TypeError} The instant is outside the years 0 to 9999.
+ */
+export function timestampOf(seconds, name) {
+    const text = new Date(seconds * 1000).toISOString();
+    if (!/^\d{4}-/.test(text)) throw new TypeError(`${name} must fall between the years 0 and 9999`);
+    return text.replace(".000Z", "Z");
 }

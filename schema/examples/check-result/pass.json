@@ -35,7 +35,7 @@
         "name": "expiresWithin",
         "value": "14d"
       },
-      "message": "44.4 days are left, not below 14d",
+      "message": "44 days are left, not below 14d",
       "actual": 3837469,
       "expected": 1209600
     },
@@ -46,7 +46,7 @@
         "name": "maxLifetimeUsed",
         "value": 0.8
       },
-      "message": "51% of the lifetime is used, within 80%",
+      "message": "50% of the lifetime is used, within 80%",
       "actual": 0.5064983281893004,
       "expected": 0.8
     },
