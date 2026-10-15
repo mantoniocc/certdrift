@@ -1,5 +1,6 @@
 import { outsideValidity } from "./derived.js";
 import { sanItem } from "./policy.js";
+import { findKey } from "./private-key.js";
 import { usageName } from "./usage.js";
 
 // What each entry of a policy decides, as the README's table of reason codes says it. A rule reads
@@ -17,6 +18,7 @@ import { usageName } from "./usage.js";
  * @property {string} notAfter
  * @property {string} kind
  * @property {string} sha256
+ * @property {string} spkiSha256
  * @property {string[] | null} eku
  * @property {{ dns: string[], ip: string[] }} san
  */
@@ -30,15 +32,20 @@ import { usageName } from "./usage.js";
  * @property {number} now The instant as seconds.
  * @property {string} nowText The same instant as the timestamp the result records.
  * @property {any} value
+ * @property {import("./index.js").PrivateKey} [privateKey] What `matchesPrivateKey` reads. It is there
+ *   whenever that entry is evaluated: without it, the entry is refused with the policy.
  */
 
 /**
- * What a rule found, and what it compared it with.
+ * What a rule found, and what it compared it with. `code` is there only where an entry has more
+ * than one and the rule says which, and `actual` and `expected` are absent where a rule has
+ * nothing public to show.
  * @typedef {object} Finding
  * @property {boolean} holds
+ * @property {string} [code]
  * @property {string} message
- * @property {unknown} actual
- * @property {unknown} expected
+ * @property {unknown} [actual]
+ * @property {unknown} [expected]
  */
 
 /** @type {Record<string, (input: Input) => Finding>} */
@@ -176,6 +183,10 @@ export const RULES = {
             actual: target.kind,
             expected: "end-entity",
         };
+    },
+
+    matchesPrivateKey({ target, privateKey }) {
+        return findKey(target.spkiSha256, /** @type {import("./index.js").PrivateKey} */ (privateKey));
     },
 };
 

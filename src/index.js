@@ -3,6 +3,7 @@ export { serializeObservation, serializeCheckResult } from "./serialize.js";
 export { outsideValidity } from "./derived.js";
 export { policyProblems, entryOfCode } from "./policy.js";
 export { evaluate } from "./evaluate.js";
+export { matchesPrivateKey } from "./private-key.js";
 export { ParseError, AmbiguousTargetError, PolicyError } from "./errors.js";
 export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 
@@ -15,7 +16,8 @@ export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 // `SubjectAltNames` are there because `subject`, `issuer` and `san` cannot be named without
 // them, `PolicyProblem` because `policyProblems()` returns a list of them, and `Rule` and
 // `EvaluateOptions` because a rule of the caller's own and the options of `evaluate()` have to be
-// written down by whoever passes them. The shapes of
+// written down by whoever passes them, and `PrivateKey` and `MatchesPrivateKeyOptions` because a key
+// and the options of `matchesPrivateKey()` are built by the caller. The shapes of
 // `key`, `derived` and `observation` are written inline by the compiler.
 // Adding a type here is additive for the people who use the package; removing or renaming one
 // is not.
@@ -151,4 +153,19 @@ export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
  *   the contract writes. It defaults to the observation's `at`, and is recorded cut to the whole second.
  * @property {readonly Rule[]} [rules] Rules of the caller's own, evaluated after the policy's in the
  *   order given.
+ * @property {PrivateKey} [privateKey] Asks for the rule `matchesPrivateKey`: it is evaluated even when
+ *   the policy does not list it, with severity `fail` unless the policy says otherwise. A policy that
+ *   lists it needs this. It is read by that rule alone and is never in the result.
+ */
+
+/**
+ * A private key as a file holds it. Only PEM is read.
+ * @typedef {object} PrivateKey
+ * @property {string | Uint8Array} material The text or the bytes of the file.
+ * @property {string | undefined} [passphrase] Text, for a key that is encrypted. An empty string is a passphrase.
+ */
+
+/**
+ * @typedef {object} MatchesPrivateKeyOptions
+ * @property {"fail" | "warn"} [severity] `fail` unless it says `warn`; anything else is a `TypeError`.
  */

@@ -28,7 +28,7 @@ import { expectedContents, holdsPrivateKey } from "./package-contents.mjs";
 const root = new URL("../", import.meta.url);
 const repository = fileURLToPath(root);
 const errorsOf = validatorFor("observation");
-const FIXTURES = ["leaf-p256.pem", "leaf-p256.der"];
+const FIXTURES = ["leaf-p256.pem", "leaf-p256.der", "leaf-p256.key", "leaf-rsa.key"];
 const AT = new Date("2026-09-15T14:02:11Z");
 
 /**
@@ -320,6 +320,41 @@ test("the installed library evaluates a policy against an observation and gives 
     assert.deepEqual(installed.refused.slice(0, 4), [true, true, "PolicyError", "the policy is not valid: 1 problem"]);
     assert.deepEqual(installed.refused[4].map((/** @type {{ path: string }} */ problem) => problem.path), ["/matchesPrivateKey"]);
     assert.deepEqual(installed.entries, ["validityNotEnded", "matchesPrivateKey", null, null]);
+});
+
+test("the installed library matches a private key to a certificate as the working copy does, through matchesPrivateKey and through evaluate, and refuses what is not text or bytes", async () => {
+    const result = await runInConsumer("key.mjs", `
+        import { readFileSync } from "node:fs";
+        import { evaluate, inspect, matchesPrivateKey, serializeCheckResult } from "certdrift";
+        const observation = inspect(readFileSync("leaf-p256.pem"), { at: new Date("2026-09-15T14:02:11Z") });
+        const answers = [
+            matchesPrivateKey(observation, { material: readFileSync("leaf-p256.key") }),
+            matchesPrivateKey(observation, { material: readFileSync("leaf-rsa.key", "utf8") }, { severity: "warn" }),
+            matchesPrivateKey(observation, { material: readFileSync("leaf-p256.pem") }),
+            matchesPrivateKey(observation, { material: "" }),
+        ];
+        const check = evaluate(observation, { contract: 1 }, { privateKey: { material: readFileSync("leaf-p256.key"), passphrase: "unused" } });
+        let wrong = null;
+        try { matchesPrivateKey(observation, { material: "", passphrase: 12345 }); } catch (error) { wrong = [error instanceof TypeError, error.message]; }
+        console.log(JSON.stringify({ answers, text: serializeCheckResult(check), wrong }));
+    `);
+    assert.equal(result.code, 0, shown(result));
+    const installed = JSON.parse(result.stdout);
+
+    const working = await import("../src/index.js");
+    const observation = working.inspect(readFileSync(new URL("test/fixtures/leaf-p256.pem", root)), { at: new Date("2026-09-15T14:02:11Z") });
+    const key = (/** @type {string} */ name) => readFileSync(new URL(`test/fixtures/${name}`, root));
+    assert.deepEqual(installed.answers, [
+        working.matchesPrivateKey(observation, { material: key("leaf-p256.key") }),
+        working.matchesPrivateKey(observation, { material: key("leaf-rsa.key").toString("utf8") }, { severity: "warn" }),
+        working.matchesPrivateKey(observation, { material: key("leaf-p256.pem") }),
+        working.matchesPrivateKey(observation, { material: "" }),
+    ]);
+    assert.deepEqual(installed.answers.map((/** @type {{ code: string, status: string }} */ answer) => `${answer.code} ${answer.status}`), ["KEY_MISMATCH pass", "KEY_MISMATCH warn", "KEY_UNREADABLE fail", "KEY_UNREADABLE fail"]);
+    const check = working.evaluate(observation, { contract: 1 }, { privateKey: { material: key("leaf-p256.key"), passphrase: "unused" } });
+    assert.equal(installed.text, working.serializeCheckResult(check), "the same bytes");
+    assert.deepEqual(validatorFor("check-result")(JSON.parse(installed.text)), []);
+    assert.deepEqual(installed.wrong, [true, "privateKey.passphrase must be text"]);
 });
 
 test("the installed library says whether a validity is current, has ended or has not started as the working copy does, and refuses what is not an instant", async () => {
@@ -802,6 +837,49 @@ test("evaluate, EvaluateOptions, Rule and PolicyError import as types and values
     });
     assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
 
+    const key = await typeCheckInConsumer({
+        "key.ts": `
+        import type { CheckResult, EvaluateOptions, MatchesPrivateKeyOptions, Observation, PrivateKey, Result } from "certdrift";
+        import { evaluate, inspect, matchesPrivateKey } from "certdrift";
+        ${TYPE_HELPERS}
+
+        export type Checks = [
+            Expect<Equal<ReturnType<typeof matchesPrivateKey>, Result>>,
+            Expect<Equal<Parameters<typeof matchesPrivateKey>[0], Observation>>,
+            Expect<Equal<Parameters<typeof matchesPrivateKey>[1], PrivateKey>>,
+            Expect<Equal<Parameters<typeof matchesPrivateKey>[2], MatchesPrivateKeyOptions | undefined>>,
+            Expect<Equal<NonNullable<EvaluateOptions["privateKey"]>, PrivateKey>>,
+            Expect<Equal<PrivateKey["material"], string | Uint8Array>>,
+            Expect<Equal<NonNullable<MatchesPrivateKeyOptions["severity"]>, "fail" | "warn">>,
+            // None of them is \`any\`, which would be equal to a type that is \`any\` too.
+            Expect<Equal<Equal<PrivateKey, any>, false>>,
+            Expect<Equal<Equal<MatchesPrivateKeyOptions, any>, false>>,
+        ];
+
+        declare const given: string | undefined;
+        const observation = inspect(new Uint8Array());
+        export const asText: Result = matchesPrivateKey(observation, { material: "-----BEGIN PRIVATE KEY-----" });
+        export const asBytes: Result = matchesPrivateKey(observation, { material: new Uint8Array(), passphrase: given }, { severity: "warn" });
+        export const key: PrivateKey = { material: Buffer.from(""), passphrase: "" };
+        export const check: CheckResult = evaluate(observation, { contract: 1, matchesPrivateKey: { severity: "warn" } }, { privateKey: key });
+
+        // Each of these fails as an unused directive if its type collapses to \`any\`.
+        // @ts-expect-error: the material is text or bytes
+        export const notMaterial: PrivateKey = { material: 5 };
+        // @ts-expect-error: the passphrase is text
+        export const notPassphrase: PrivateKey = { material: "", passphrase: 12345 };
+        // @ts-expect-error: a passphrase is not bytes
+        export const notBytes: PrivateKey = { material: "", passphrase: Buffer.from("") };
+        // @ts-expect-error: the key has a material
+        export const noMaterial: PrivateKey = {};
+        // @ts-expect-error: a severity is fail or warn
+        export const notSeverity: MatchesPrivateKeyOptions = { severity: "loud" };
+        // @ts-expect-error: the options of evaluate take a key as an object
+        export const notKey: EvaluateOptions = { privateKey: "-----BEGIN PRIVATE KEY-----" };
+    `,
+    });
+    assert.deepEqual([key.code, key.stdout], [0, ""], shown(key));
+
     const strictest = await typeCheckInConsumer({
         "strict.ts": `
         import type { EvaluateOptions, Rule } from "certdrift";
@@ -810,6 +888,8 @@ test("evaluate, EvaluateOptions, Rule and PolicyError import as types and values
         export const options: EvaluateOptions = { rules: [rule] };
         export const check = evaluate(inspect(new Uint8Array()), { contract: 1 }, options);
         export const checkResults = check.results.map((result) => result.code);
+        declare const given: string | undefined;
+        export const keyed = evaluate(inspect(new Uint8Array()), { contract: 1 }, { privateKey: { material: "", passphrase: given } });
     `,
     }, { exactOptionalPropertyTypes: true, noUncheckedIndexedAccess: true, noPropertyAccessFromIndexSignature: true, verbatimModuleSyntax: true, isolatedModules: true, skipLibCheck: false });
     assert.deepEqual([strictest.code, strictest.stdout], [0, ""], shown(strictest));

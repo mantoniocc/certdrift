@@ -120,7 +120,8 @@ for (const name of exampleFiles) {
 }
 
 // The examples are what the library writes, so the text of a message is never one nobody produces.
-// Two of them are made with a rule of the caller's own, and two need a private key `evaluate` is not given.
+// Two of them are made with a rule of the caller's own, and two hold the hash of a key that is not
+// in the repository (`test/evaluate-key.test.js` checks their results against what a key gives).
 const OWN_RULES = /** @type {Record<string, Function[]>} */ ({
     "own-rule.json": [
         function issuerAllowed() {
