@@ -297,7 +297,7 @@ test("a bad value of a repeated option is named as it was typed, escaped, and th
         "certdrift: the requirement options are not valid: 2 problems",
         '  --expect-san: "second one" is not a value this flag accepts',
         '  --expect-san: "bad\\u001b[31m\\u{202E}name" is not a value this flag accepts',
-        "Usage: certdrift check [requirements] [--policy <file>] [--as-of <date>] [--select <sha256>] [--json | --quiet] <path | ->",
+        "Usage: certdrift check [requirements] [--key <file> [--key-passphrase-env <VAR>]] [--policy <file>] [--as-of <date>] [--select <sha256>] [--json | --quiet] <path | ->",
     ]);
 });
 
@@ -573,11 +573,14 @@ test("a code that does not exist, or that has no entry to soften, is exit 2: a m
         assert.match(result.stderr, /^certdrift: --warn-only needs the reason code of a rule that has a severity\n/, JSON.stringify(code));
         assert.ok(result.stderr.split("\n")[1].includes(JSON.stringify(code).replaceAll("\\", "\\\\")) || code === "", result.stderr);
     }
-    // KEY_MISMATCH has an entry, which this command never runs.
+    // The entry of a key code is part of the run only when a key is given: --key asks for it, and a
+    // file that lists it without a key is refused by the library.
     for (const code of ["KEY_MISMATCH", "KEY_UNREADABLE"]) {
         const result = await check(["--warn-only", code, "--reject-eku", "codeSigning", typed("leaf-p256.pem")]);
         assert.equal(result.code, 2);
-        assert.match(result.stderr, new RegExp(`--warn-only: ${code} belongs to matchesPrivateKey, which this run does not check: list matchesPrivateKey in the policy\\n`));
+        assert.match(result.stderr, new RegExp(`--warn-only: ${code} belongs to matchesPrivateKey, which this run does not check: give --key\\n`));
+        const given = await check(["--as-of", startOf("leaf-p256.pem"), "--warn-only", code, "--key", typed("leaf-p256.key"), "--reject-eku", "codeSigning", typed("leaf-p256.pem")]);
+        assert.equal(given.code, 0, given.stderr);
     }
 });
 
@@ -953,7 +956,7 @@ test("exit 3 for a certificate that is missing or is not one, and for standard i
     }
 });
 
-test("a policy that lists matchesPrivateKey is exit 2, because check is not given a private key", async (t) => {
+test("a policy file that lists matchesPrivateKey and a run with no --key is exit 2, and says the policy asks for a private key in the words of the library's PolicyError", async (t) => {
     const dir = scratch(t);
     const path = written(dir, "key.json", '{"contract":1,"matchesPrivateKey":{}}');
     const result = await check(["--as-of", startOf("leaf-p256.pem"), "--policy", path, typed("leaf-p256.pem")]);
@@ -962,6 +965,9 @@ test("a policy that lists matchesPrivateKey is exit 2, because check is not give
     // The material is read first, so a missing certificate is the first thing said.
     const missing = await check(["--policy", path, "missing.pem"]);
     assert.equal(missing.code, 3);
+    // The same file with a key is a run.
+    const given = await check(["--as-of", startOf("leaf-p256.pem"), "--policy", path, "--key", typed("leaf-p256.key"), typed("leaf-p256.pem")]);
+    assert.equal(given.code, 0, given.stderr);
 });
 
 test("a TypeError from evaluate is a bug of the command and exits 4, and only a PolicyError is exit 2", async (t) => {
@@ -1036,7 +1042,7 @@ test("--json over every certificate fixture validates against the check result s
     }
 });
 
-test("every example policy over every certificate fixture: the empty one gives POLICY_EMPTY, server.json is what evaluate gives, and every-rule.json and pinned.json are exit 2 at /matchesPrivateKey because check takes no private key yet", { timeout: 240_000 }, async () => {
+test("every example policy over every certificate fixture: the empty one gives POLICY_EMPTY, server.json is what evaluate gives, and every-rule.json and pinned.json are exit 2 at /matchesPrivateKey without --key", { timeout: 240_000 }, async () => {
     const checked = await overEveryFixture(async (name) => {
         const { certificate, select } = targetOf(name);
         const run_ = (/** @type {string} */ policy) => check(["--json", "--as-of", certificate.notBefore, "--policy", policyPath(policy), ...select, typed(name)]);
@@ -1202,6 +1208,9 @@ test("the README examples of check run against fixtures and end with an exit cod
     // What the files named in the README stand for.
     writeFileSync(join(dir, "server.pem"), fixture("leaf-p256.pem"));
     writeFileSync(join(dir, "policy.json"), readFileSync(policyUrl("server")));
+    writeFileSync(join(dir, "server.key"), fixture("leaf-p256.key"));
+    writeFileSync(join(dir, "encrypted.key"), fixture("leaf-p256.pkcs8-encrypted.key"));
+    const env = { SERVER_KEY_PASSPHRASE: readFileSync(new URL("fixtures/test-only-passphrase.txt", import.meta.url), "utf8").replace(/\n$/, "") };
     const sh = [...checkSection().matchAll(/```sh\n([\s\S]*?)```/g)].flatMap((block) => block[1].split("\n")).filter((line) => line.startsWith("certdrift check"));
     assert.ok(sh.length >= 5, `the README has ${sh.length} examples of check`);
 
@@ -1209,12 +1218,14 @@ test("the README examples of check run against fixtures and end with an exit cod
         const redirect = /^(.*) < (\S+)$/.exec(line);
         const words = (redirect === null ? line : redirect[1]).split(" ").slice(1);
         for (const word of words) assert.doesNotMatch(word, /['"$|;&]/, `the example ${line} uses only plain words`);
-        const files = words.filter((word) => /\.(pem|json)$/.test(word));
-        for (const file of files) assert.ok(["server.pem", "policy.json"].includes(file), `${line} names ${file}, which this test does not know`);
-        const result = await run(words, { cwd: dir, ...(redirect === null ? {} : { input: readFileSync(join(dir, redirect[2])) }) });
+        const files = words.filter((word) => /\.(pem|json|key)$/.test(word));
+        for (const file of files) assert.ok(["server.pem", "policy.json", "server.key", "encrypted.key"].includes(file), `${line} names ${file}, which this test does not know`);
+        const result = await run(words, { cwd: dir, env, ...(redirect === null ? {} : { input: readFileSync(join(dir, redirect[2])) }) });
         assert.ok(result.code === 0 || result.code === 1, `${line}: exit ${result.code}\n${result.stderr}`);
         if (words.includes("--json")) assert.deepEqual(errorsOf(JSON.parse(result.stdout)), [], line);
         else assert.ok(result.stdout.endsWith(`exit ${result.code}\n`), `${line}\n${result.stdout}`);
+        // A key given in an example is the certificate's own, so the rule is part of the output and holds.
+        if (words.includes("--key") && !words.includes("--json")) assert.match(result.stdout, /^ {2}OK {4}matchesPrivateKey {2}KEY_MISMATCH {3}the private key corresponds to the certificate's public key$/m, line);
     }
     // The commands the README shows with the output it shows.
     const shown = checkSection().match(/```text\n([\s\S]*?)```/);

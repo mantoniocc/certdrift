@@ -29,6 +29,23 @@ export const FLAGS = [
 ];
 
 /**
+ * The options that ask for an entry without building its value from their text. The entry is
+ * evaluated whenever the option is given, whether the policy lists it or not, and the policy file
+ * is still where its severity is set, so such an option never conflicts with the file.
+ * @type {readonly { flag: string, entry: string }[]}
+ */
+export const ASKED = [{ flag: "key", entry: "matchesPrivateKey" }];
+
+/**
+ * The entries the options ask for, among the ones that were given.
+ * @param {Readonly<Record<string, unknown>>} given What `parseArgs` read.
+ * @returns {string[]}
+ */
+export function askedEntries(given) {
+    return ASKED.filter(({ flag }) => given[flag] !== undefined).map(({ entry }) => entry);
+}
+
+/**
  * The entries every run has, whether the policy lists them or not. `evaluate` always runs them
  * and a test keeps this list in step with it.
  */
@@ -165,8 +182,10 @@ export function warnTargets(codes) {
 export function inactiveCodes(targets, present) {
     const run = new Set([...ALWAYS_ENTRIES, ...present]);
     return [...targets].filter(([, entry]) => !run.has(entry)).map(([code, entry]) => {
+        const asked = ASKED.find((candidate) => candidate.entry === entry);
         const row = FLAGS.find((candidate) => candidate.entry === entry);
-        const how = row === undefined ? `list ${entry} in the policy` : `give --${row.flag} or list ${entry} in the policy`;
+        // An entry that only an option asks for is refused when the file lists it without one.
+        const how = asked !== undefined ? `give --${asked.flag}` : row === undefined ? `list ${entry} in the policy` : `give --${row.flag} or list ${entry} in the policy`;
         return `--warn-only: ${code} belongs to ${entry}, which this run does not check: ${how}`;
     });
 }

@@ -148,7 +148,7 @@ test("a code is active when its entry is one of the two validity entries or is i
     assert.deepEqual(inactiveCodes(entries, []), [
         "--warn-only: EKU_MISSING belongs to expectEku, which this run does not check: give --expect-eku or list expectEku in the policy",
         "--warn-only: SAN_MISSING belongs to expectSan, which this run does not check: give --expect-san or list expectSan in the policy",
-        "--warn-only: KEY_MISMATCH belongs to matchesPrivateKey, which this run does not check: list matchesPrivateKey in the policy",
+        "--warn-only: KEY_MISMATCH belongs to matchesPrivateKey, which this run does not check: give --key",
     ]);
     assert.deepEqual(inactiveCodes(entries, ["expectEku", "expectSan", "matchesPrivateKey"]), []);
 });

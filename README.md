@@ -84,9 +84,41 @@ certdrift check --policy policy.json --warn-only LIFETIME_USED_EXCEEDED server.p
 certdrift check --policy policy.json --expect-fingerprint 2D:71:16:42:B7:26:B0:44:01:62:7C:A9:FB:AC:32:F5:C8:53:0F:B1:90:3C:C4:DB:02:25:87:17:92:1A:48:81 server.pem
 ```
 
-With no requirement option and no `--policy` there is nothing to check, which is exit 2; `--warn-only` and `--as-of` alone do not count. A policy that has only `contract` is something to check, and gives the `POLICY_EMPTY` warning. The command is not given a private key, so a policy that lists `matchesPrivateKey` is exit 2.
+With no requirement option, no `--key` and no `--policy` there is nothing to check, which is exit 2; `--warn-only` and `--as-of` alone do not count. A policy that has only `contract` is something to check, and gives the `POLICY_EMPTY` warning. A policy that lists `matchesPrivateKey` needs `--key`: without one it is exit 2, and the message says that the policy asks for a private key.
 
 If a policy file repeats an entry, as `{"expectEku": …, "expectEku": …}`, only the last one is read, as with any JSON.
+
+### A private key
+
+Before a renewed certificate goes live, the question is whether it and the private key in hand are a pair. `--key <file>` answers it: the file is read as a PEM private key, and the certificate is checked against it by the rule `matchesPrivateKey`, whose result is added to the others and to the verdict.
+
+```sh
+certdrift check --key server.key --expect-san api.example.com --expect-eku serverAuth --expires-within 30d server.pem
+```
+
+```text
+server.pem  checked at 2026-10-20T00:00:00Z
+  OK    validityStarted    NOT_YET_VALID  the certificate is valid from 2026-10-14T17:37:52Z
+  OK    validityNotEnded   EXPIRED        the certificate is valid until 2027-01-12T17:37:52Z
+  OK    expiresWithin      EXPIRES_SOON   84 days are left, not below 30d
+  OK    expectEku          EKU_MISSING    the Extended Key Usage extension lists clientAuth, serverAuth, which includes serverAuth
+  OK    expectSan          SAN_MISSING    the certificate lists every expected name
+  OK    matchesPrivateKey  KEY_MISMATCH   the private key corresponds to the certificate's public key
+
+0 failed · exit 0
+```
+
+With another key, the last result is `FAIL  matchesPrivateKey  KEY_MISMATCH` and the command exits with 1. The key is a requirement of its own, so `--key` alone is something to check and gives no `POLICY_EMPTY` warning. Its severity is `fail`, or the one a policy file gives `matchesPrivateKey` when it lists it, and `--warn-only KEY_MISMATCH` and `--warn-only KEY_UNREADABLE` soften it. A file that opens and does not hold a readable private key is not misuse and not a crash: it is the result `KEY_UNREADABLE`, a failed check with exit 1, and its message says why (the file holds a certificate, a public key or no private key, the key is encrypted and no passphrase was given, it could not be decrypted with the passphrase given, the file holds more than one private key, or its format or algorithm is not supported). A key file that cannot be opened is exit 3, as a certificate file is. `--key -` is misuse: a key is never read from standard input.
+
+`--key-passphrase-env <VAR>` takes the passphrase of an encrypted key from the environment variable `VAR`, exactly as the variable holds it, with no trimming. **There is no option that takes the passphrase itself, on purpose:** a command line is shown to every user of the machine by the list of processes, and an environment is not. A variable that is not defined is exit 2, and so is `--key-passphrase-env` without `--key`. A variable that is defined and empty is an empty passphrase, which is not the same as no passphrase. A key that is not encrypted is read with any passphrase.
+
+```sh
+certdrift check --key encrypted.key --key-passphrase-env SERVER_KEY_PASSPHRASE server.pem
+```
+
+Set the variable without typing the passphrase in a command, for example with `read -rs SERVER_KEY_PASSPHRASE` followed by `export SERVER_KEY_PASSPHRASE`.
+
+The key and the passphrase never appear on standard output, on standard error or in the JSON, whatever the way the check ends; the message of a failure names the key file's path and nothing of its content. The command only reads the file: the matching is the library's `matchesPrivateKey`, described below. `--key` and `--key-passphrase-env` given twice are misuse, as the other options that take one value are.
 
 ### The instant
 
@@ -106,16 +138,16 @@ certdrift check --json --reject-eku codeSigning - < server.pem
 
 ### Exit codes of `check`
 
-`0` when no result fails (a warning does not), `1` when one does, `2` for misuse, an invalid policy or an ambiguous bundle, `3` when the certificate or the policy file cannot be read or the material is not a certificate, and `4` when the command crashes. The table below has them all.
+`0` when no result fails (a warning does not), `1` when one does, `2` for misuse, an invalid policy or an ambiguous bundle, `3` when the certificate, the key file or the policy file cannot be read or the material is not a certificate, and `4` when the command crashes. The table below has them all.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | Success. For `certdrift check`, no result failed. |
-| `1` | A check failed: `certdrift check` has a result that is `FAIL`. `inspect` never gives it. |
-| `2` | Misuse, a `--query` path the schema does not declare, or a bundle whose certificate is ambiguous (the candidates are listed). |
-| `3` | The file is missing or unreadable (the policy file of `check` too), the policy file is not JSON, the material is not a certificate, or the host cannot be reached, refuses the connection, does not speak TLS or does not answer in time. |
+| `1` | A check failed: `certdrift check` has a result that is `FAIL`, a key that is not the certificate's or cannot be read as a private key (`KEY_UNREADABLE`) included. `inspect` never gives it. |
+| `2` | Misuse, a `--query` path the schema does not declare, a policy that is not valid (one that lists `matchesPrivateKey` with no `--key` included), or a bundle whose certificate is ambiguous (the candidates are listed). |
+| `3` | The file is missing or unreadable (the policy file and the key file of `check` too), the policy file is not JSON, the material is not a certificate, or the host cannot be reached, refuses the connection, does not speak TLS or does not answer in time. |
 | `4` | The command crashed: an error it did not expect, which is a bug. The error is printed on standard error as it is, even with `--quiet`. |
 
 A fault that kills Node.js with a signal cannot be caught, and the shell then reports a code of its own, for example 134 or 139.
@@ -209,7 +241,7 @@ const result = matchesPrivateKey(observation, { material: keyPem, passphrase: "�
 console.log(result.code, result.status, result.message);
 ```
 
-`privateKey` is `{ material, passphrase }`. `material` is the text or the bytes of the key's file, and `passphrase` is optional text, for a key that is encrypted. An empty string is a passphrase. The library never reads a file: whoever calls it does. Only PEM is read, so a DER file or a PKCS#12 file is a key that could not be read. `options.severity` is `fail` unless it says `warn`, and any other value is a `TypeError`. `evaluate` takes the same object as `options.privateKey`.
+`privateKey` is `{ material, passphrase }`. `material` is the text or the bytes of the key's file, and `passphrase` is optional text, for a key that is encrypted. An empty string is a passphrase. The library never reads a file: whoever calls it does. Only PEM is read, so a DER file or a PKCS#12 file is a key that could not be read. `options.severity` is `fail` unless it says `warn`, and any other value is a `TypeError`. `evaluate` takes the same object as `options.privateKey`. `certdrift check --key` reads the file, and the passphrase from an environment variable, and gives them to `evaluate` this way: see [A private key](#a-private-key).
 
 The key matches when the SHA-256 of the public key derived from it, as SubjectPublicKeyInfo DER, is the target's `spkiSha256`. A key that was read gives `KEY_MISMATCH`: `pass` when it matches, and the status of the severity when it does not, with the SHA-256 of the key's public key as `actual` and the target's `spkiSha256` as `expected`, both public. A key that could not be read gives `KEY_UNREADABLE`, with the status of the severity and no `actual` or `expected`, and a message that says why. The message is fixed text for each reason, and it starts with `the private key could not be read: `:
 

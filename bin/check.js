@@ -10,7 +10,9 @@ import {
     warningLines,
 } from "./command.js";
 import {
+    ASKED,
     FLAGS,
+    askedEntries,
     conflicts,
     entriesOf,
     flagProblems,
@@ -21,6 +23,7 @@ import {
     problemLines,
     warnTargets,
 } from "./policy-flags.js";
+import { KEY_OPTIONS, keyRequestOf, readKey } from "./private-key.js";
 import { safe } from "./safe.js";
 
 /** @import { CheckResult } from "../src/index.js" */
@@ -45,15 +48,17 @@ export const CHECK_OPTIONS = /** @type {const} */ ({
     policy: { type: "string", multiple: true },
     "as-of": { type: "string", multiple: true },
     select: { type: "string", multiple: true },
+    // --key and --key-passphrase-env, defined once for every command that takes a key.
+    ...KEY_OPTIONS,
     json: { type: "boolean" },
     quiet: { type: "boolean", short: "q" },
     help: { type: "boolean", short: "h" },
 });
 
 /** The flags that take one value: given twice, they are misuse, in the order they are checked. */
-const ONE_VALUE = /** @type {const} */ (["expect-fingerprint", "expires-within", "lifetime-used", "policy", "as-of", "select"]);
+const ONE_VALUE = /** @type {const} */ (["expect-fingerprint", "expires-within", "lifetime-used", "policy", "as-of", "select", "key", "key-passphrase-env"]);
 
-export const CHECK_USAGE = "Usage: certdrift check [requirements] [--policy <file>] [--as-of <date>] [--select <sha256>] [--json | --quiet] <path | ->";
+export const CHECK_USAGE = "Usage: certdrift check [requirements] [--key <file> [--key-passphrase-env <VAR>]] [--policy <file>] [--as-of <date>] [--select <sha256>] [--json | --quiet] <path | ->";
 
 export const CHECK_HELP = `certdrift check decides whether a certificate meets requirements.
 
@@ -77,6 +82,21 @@ always checked):
   --lifetime-used <N%>           No more than this percentage of the validity has gone: 66% or
                                  66.3%, from 0% to 100%.
 
+Private key (adds the rule matchesPrivateKey, which says whether the key is the certificate's):
+  --key <file>                  The private key, a PEM file. The result is OK when it belongs to the
+                                certificate and FAIL when it is another key (KEY_MISMATCH) or the
+                                file holds no readable private key (KEY_UNREADABLE, with the reason).
+                                The severity is fail, or the one the policy file gives
+                                matchesPrivateKey. --warn-only KEY_MISMATCH and --warn-only
+                                KEY_UNREADABLE soften it. The key is never printed.
+  --key-passphrase-env <VAR>    The passphrase of an encrypted key is the value of this environment
+                                variable, exactly as it is (an empty variable is an empty
+                                passphrase). A variable that is not defined is misuse, and so is
+                                this option without --key.
+  No option takes the passphrase itself, on purpose: a command line is shown to every user of the
+  machine by the list of processes, and an environment is not. Set the variable without typing the
+  passphrase in the command, for example with: read -rs KEY_PASSPHRASE && export KEY_PASSPHRASE
+
 Options:
   --policy <file>       Read the requirements from a policy file, JSON with "contract": 1. The
                         options above add to it. An option that gives an entry the file already has
@@ -93,22 +113,24 @@ Options:
   -q, --quiet           Print nothing. The exit code still says what happened.
   -h, --help            Print this text.
 
-With no requirement option and no --policy there is nothing to check, which is misuse. --warn-only
-and --as-of alone do not count. A policy with only "contract" is something to check, and says so
-with a POLICY_EMPTY warning.
+With no requirement option, no --key and no --policy there is nothing to check, which is misuse.
+--warn-only and --as-of alone do not count. A policy that lists matchesPrivateKey needs --key. A
+policy with only "contract" is something to check, and says so with a POLICY_EMPTY warning.
 
     certdrift check --expect-san api.example.com --expires-within 30d server.pem
     certdrift check --policy policy.json --warn-only LIFETIME_USED_EXCEEDED server.pem
+    certdrift check --key server.key --key-passphrase-env KEY_PASSPHRASE --expect-san api.example.com server.pem
 
 ${COLOUR_NOTE}
 
 Exit codes:
   0  No result failed. A result that is a warning does not fail the check.
-  1  A check failed: at least one result is FAIL.
-  2  Misuse, a policy that is not valid, or a bundle whose certificate is ambiguous (the
-     candidates are listed).
-  3  The certificate or the policy file is missing or unreadable, the policy file is not JSON, or
-     the material is not a certificate.
+  1  A check failed: at least one result is FAIL. A key that is not the certificate's, or that
+     cannot be read as a private key, is one.
+  2  Misuse, a policy that is not valid (one that lists matchesPrivateKey with no --key is not), or
+     a bundle whose certificate is ambiguous (the candidates are listed).
+  3  The certificate, the key file or the policy file is missing or unreadable, the policy file is
+     not JSON, or the material is not a certificate.
   4  The command crashed: an error it did not expect, which is a bug. The error is printed on
      standard error as it is, even with --quiet.
 `;
@@ -175,7 +197,7 @@ export function presentCheck(result, { described, colour }) {
 
 /**
  * Runs `certdrift check`. Misuse is reported before anything is read; reading comes in the order
- * the policy file, then the material.
+ * the policy file, the private key, then the material.
  * @param {string[]} args The arguments after `check`.
  * @param {Context} context
  * @returns {Promise<number>}
@@ -200,6 +222,9 @@ export async function checkCommand(args, { env, stdin, out, err }) {
     if (select === "") return misuse("--select needs the start of a sha256, and it is empty");
     const policyPath = values.policy?.[0];
     if (policyPath === "-" && path === "-") return misuse("--policy - and the path - both read standard input, which can be read once");
+    const keyAsked = keyRequestOf(values, env);
+    if ("misuse" in keyAsked) return misuse(keyAsked.misuse);
+    const { request: keyRequest } = keyAsked;
 
     // The instant is checked before anything is read, as the typed forms are, so that a typo is
     // misuse whatever the files hold and never waits on standard input.
@@ -214,7 +239,7 @@ export async function checkCommand(args, { env, stdin, out, err }) {
         const problem = percentProblem(text);
         if (problem !== null) return misuse(`--lifetime-used ${problem}, and got ${JSON.stringify(text)}`);
     }
-    if (FLAGS.every(({ flag }) => /** @type {Record<string, unknown>} */ (values)[flag] === undefined) && policyPath === undefined) {
+    if ([...FLAGS, ...ASKED].every(({ flag }) => /** @type {Record<string, unknown>} */ (values)[flag] === undefined) && policyPath === undefined) {
         return misuse("nothing to check: give a requirement option or --policy");
     }
 
@@ -247,10 +272,23 @@ export async function checkCommand(args, { env, stdin, out, err }) {
     }
     const clash = conflicts(file, entries);
     if (clash.length > 0) return misuse(`${policyDescribed}: the options and the policy file give the same entry`, clash);
-    const present = [...Object.keys(entries), ...Object.keys(file)];
+    const present = [...Object.keys(entries), ...Object.keys(file), ...askedEntries(values)];
     const inactive = inactiveCodes(targets.entries, present);
     if (inactive.length > 0) return misuse("--warn-only names a rule this run does not check", inactive);
     const policy = mergePolicy(file, entries, new Set(targets.entries.values()));
+
+    // The key is read after the policy file and before the material, so that every file an option
+    // names is read before the certificate, and a missing key never waits on standard input.
+    /** @type {import("../src/index.js").PrivateKey | undefined} */
+    let privateKey;
+    if (keyRequest !== undefined) {
+        const key = await readKey(keyRequest.path);
+        if ("code" in key) {
+            err(key.message);
+            return key.code;
+        }
+        privateKey = { material: key.material, passphrase: keyRequest.passphrase };
+    }
 
     const read = await readInput(path, stdin);
     if ("code" in read) {
@@ -267,7 +305,7 @@ export async function checkCommand(args, { env, stdin, out, err }) {
     /** @type {CheckResult} */
     let result;
     try {
-        result = evaluate(observed.observation, /** @type {import("../src/index.js").Policy} */ (policy), { now });
+        result = evaluate(observed.observation, /** @type {import("../src/index.js").Policy} */ (policy), { now, privateKey });
     } catch (error) {
         // Only the policy is misuse. A `TypeError` here means this command built a wrong call, which
         // is a bug, and it must show as one.
