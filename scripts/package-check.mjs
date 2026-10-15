@@ -289,6 +289,39 @@ test("the installed library checks a policy and serializes a check result as the
     assert.equal(installed.text, readFileSync(new URL("schema/examples/check-result/fail-and-warn.json", root), "utf8"));
 });
 
+test("the installed library evaluates a policy against an observation and gives what the working copy gives, throws PolicyError for a policy that is not valid, and maps a code to its entry", async () => {
+    const examples = "schema/examples";
+    const result = await runInConsumer("evaluate.mjs", `
+        import { readFileSync } from "node:fs";
+        import { PolicyError, entryOfCode, evaluate, inspect, serializeCheckResult } from "certdrift";
+        const policy = JSON.parse(readFileSync(process.argv[2], "utf8"));
+        delete policy.matchesPrivateKey;
+        const observation = inspect(readFileSync("leaf-p256.pem"), { at: new Date("2026-09-15T14:02:11Z") });
+        const own = function issuerAllowed(observed, now) { return { code: "ISSUER_NOT_ALLOWED", status: "warn", message: "m", actual: [observed.certificates.length, now] }; };
+        const thrower = function broken() { throw new Error("secret text"); };
+        const check = evaluate(observation, policy, { now: "2026-10-01T00:00:00Z", rules: [own, thrower] });
+        let refused = null;
+        try { evaluate(observation, { contract: 1, matchesPrivateKey: {} }); } catch (error) { refused = [error instanceof PolicyError, error instanceof Error, error.name, error.message, error.problems]; }
+        console.log(JSON.stringify({ text: serializeCheckResult(check), refused, entries: ["EXPIRED", "KEY_UNREADABLE", "POLICY_EMPTY", "RULE_ERROR"].map(entryOfCode) }));
+    `, [join(repository, examples, "policy", "every-rule.json")]);
+    assert.equal(result.code, 0, shown(result));
+    const installed = JSON.parse(result.stdout);
+
+    const working = await import("../src/index.js");
+    const policy = JSON.parse(readFileSync(new URL(`${examples}/policy/every-rule.json`, root), "utf8"));
+    delete policy.matchesPrivateKey;
+    const observation = working.inspect(readFileSync(new URL("test/fixtures/leaf-p256.pem", root)), { at: new Date("2026-09-15T14:02:11Z") });
+    const own = function issuerAllowed(/** @type {any} */ observed, /** @type {string} */ now) { return { code: "ISSUER_NOT_ALLOWED", status: /** @type {"warn"} */ ("warn"), message: "m", actual: [observed.certificates.length, now] }; };
+    const thrower = function broken() { throw new Error("secret text"); };
+    const check = working.evaluate(observation, policy, { now: "2026-10-01T00:00:00Z", rules: [own, thrower] });
+    assert.equal(installed.text, working.serializeCheckResult(check), "the same bytes");
+    assert.deepEqual(validatorFor("check-result")(JSON.parse(installed.text)), []);
+    assert.ok(!installed.text.includes("secret text"));
+    assert.deepEqual(installed.refused.slice(0, 4), [true, true, "PolicyError", "the policy is not valid: 1 problem"]);
+    assert.deepEqual(installed.refused[4].map((/** @type {{ path: string }} */ problem) => problem.path), ["/matchesPrivateKey"]);
+    assert.deepEqual(installed.entries, ["validityNotEnded", "matchesPrivateKey", null, null]);
+});
+
 test("the installed library says whether a validity is current, has ended or has not started as the working copy does, and refuses what is not an instant", async () => {
     const result = await runInConsumer("validity.mjs", `
         import { outsideValidity } from "certdrift";
@@ -701,6 +734,110 @@ test("Policy, Result, CheckResult and PolicyProblem import as types from the ins
     `,
     });
     assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+});
+
+test("evaluate, EvaluateOptions, Rule and PolicyError import as types and values from the installed package and fit each other and the check result", async () => {
+    const result = await typeCheckInConsumer({
+        "evaluate.ts": `
+        import type { CheckResult, EvaluateOptions, Observation, Policy, PolicyProblem, Result, Rule } from "certdrift";
+        import { PolicyError, entryOfCode, evaluate, inspect, serializeCheckResult } from "certdrift";
+        ${TYPE_HELPERS}
+
+        export type Checks = [
+            Expect<Equal<ReturnType<typeof evaluate>, CheckResult>>,
+            Expect<Equal<Parameters<typeof evaluate>[0], Observation>>,
+            Expect<Equal<Parameters<typeof evaluate>[1], Policy>>,
+            Expect<Equal<Parameters<typeof evaluate>[2], EvaluateOptions | undefined>>,
+            Expect<Equal<NonNullable<EvaluateOptions["now"]>, Date | string>>,
+            Expect<Equal<NonNullable<EvaluateOptions["rules"]>, readonly Rule[]>>,
+            Expect<Equal<Parameters<Rule>[0], Observation>>,
+            Expect<Equal<Parameters<Rule>[1], string>>,
+            Expect<Equal<PolicyError["problems"], { path: string, message: string }[]>>,
+            Expect<Equal<ReturnType<typeof entryOfCode>, string | null>>,
+            Expect<Equal<Parameters<typeof entryOfCode>[0], unknown>>,
+            // None of them is \`any\`, which would be equal to a type that is \`any\` too.
+            Expect<Equal<Equal<EvaluateOptions, any>, false>>,
+            Expect<Equal<Equal<Rule, any>, false>>,
+            Expect<Equal<Equal<ReturnType<typeof evaluate>, any>, false>>,
+        ];
+
+        // A result of a rule of your own may leave out its rule, and must have a code, a status and a message.
+        export const rule: Rule = (observation, now) => ({ code: "ISSUER_NOT_ALLOWED", status: observation.certificates.length > 0 && now !== "" ? "pass" : "fail", message: "m", actual: observation.certificates[0].issuer.cn });
+        export const named: Rule = () => ({ code: "A", status: "warn", rule: { name: "named", value: [1] }, message: "m", actual: null, expected: undefined });
+        export const unnamed: Rule = () => ({ code: "A", status: "warn", rule: null, message: "m" });
+        export const options: EvaluateOptions = { now: new Date(0), rules: [rule, named] };
+        export const textual: EvaluateOptions = { now: "2026-09-15T14:02:11Z" };
+        export const none: EvaluateOptions = {};
+
+        const check: CheckResult = evaluate(inspect(new Uint8Array()), { contract: 1, expiresWithin: { value: "30d" } }, options);
+        export const first: Result | undefined = check.results[0];
+        export const text: string = serializeCheckResult(check);
+        export const entry: string | null = entryOfCode("EXPIRED");
+
+        try {
+            evaluate(inspect(new Uint8Array()), { contract: 1 });
+        } catch (error) {
+            if (error instanceof PolicyError) {
+                const problems: PolicyProblem[] = error.problems;
+                const message: string = error.message;
+                const name: string = error.name;
+                void [problems, message, name];
+            }
+        }
+
+        // Each of these fails as an unused directive if its type collapses to \`any\`.
+        // @ts-expect-error: a rule has a status of one of three words
+        export const wrongStatus: Rule = () => ({ code: "A", status: "skipped", message: "m" });
+        // @ts-expect-error: a rule gives a message
+        export const noMessage: Rule = () => ({ code: "A", status: "pass" });
+        // @ts-expect-error: a rule gives a result, not a promise
+        export const later: Rule = async () => ({ code: "A", status: "pass", message: "m" });
+        // @ts-expect-error: a rule is a function
+        export const notRule: EvaluateOptions = { rules: [{ code: "A" }] };
+        // @ts-expect-error: now is a Date or text
+        export const notNow: EvaluateOptions = { now: 0 };
+        // @ts-expect-error: the policy has a contract number
+        evaluate(inspect(new Uint8Array()), {});
+    `,
+    });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+
+    const strictest = await typeCheckInConsumer({
+        "strict.ts": `
+        import type { EvaluateOptions, Rule } from "certdrift";
+        import { evaluate, inspect } from "certdrift";
+        export const rule: Rule = () => ({ code: "A", status: "pass", message: "m", actual: 1 });
+        export const options: EvaluateOptions = { rules: [rule] };
+        export const check = evaluate(inspect(new Uint8Array()), { contract: 1 }, options);
+        export const checkResults = check.results.map((result) => result.code);
+    `,
+    }, { exactOptionalPropertyTypes: true, noUncheckedIndexedAccess: true, noPropertyAccessFromIndexSignature: true, verbatimModuleSyntax: true, isolatedModules: true, skipLibCheck: false });
+    assert.deepEqual([strictest.code, strictest.stdout], [0, ""], shown(strictest));
+});
+
+test("a consumer that emits declarations names what it infers from evaluate and its options through certdrift", async () => {
+    const result = await typeCheckInConsumer({
+        "emit.ts": `
+        import { evaluate, inspect } from "certdrift";
+        import type { Rule } from "certdrift";
+        const rule: Rule = () => ({ code: "A", status: "pass", message: "m" });
+        export const checks = [rule];
+        export const options = { rules: checks, now: "2026-09-15T14:02:11Z" };
+        export const made = evaluate(inspect(new Uint8Array()), { contract: 1 }, options);
+        export const summary = made.summary;
+        export const results = made.results;
+        export const applied = made.policy;
+        export const nested = made.observation.certificates;
+        export const run = (observation: ReturnType<typeof inspect>) => evaluate(observation, { contract: 1 });
+    `,
+    }, { noEmit: false, declaration: true, emitDeclarationOnly: true, outDir: "out" });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+
+    const declarations = readFileSync(join(result.directory, "out", "emit.d.ts"), "utf8");
+    for (const name of ["CheckResult", "Policy", "Result", "CertificateObservation"]) {
+        assert.match(declarations, new RegExp(`import\\("certdrift"\\)\\.${name}\\b`), `${name} is not named through certdrift`);
+    }
+    assert.doesNotMatch(declarations, /certdrift\/types|certdrift\/src/, "the declarations point into the package's files");
 });
 
 test("a consumer that emits declarations names what it infers from policyProblems and serializeCheckResult through certdrift", async () => {

@@ -10,6 +10,7 @@ import { extendedKeyUsage } from "../src/usage.js";
 import { EXTENDED_KEY_USAGE_OIDS } from "../src/index.js";
 import { publicKeyOf } from "../src/key.js";
 import { validatorFor } from "./helpers/schema.js";
+import { EMPTY_EKU_EXTENSION, UNDECODABLE_EKU_EXTENSION } from "./helpers/certificates.js";
 
 // The normalized fields of one certificate: names, dates, serial, usages and key. Nothing here
 // may depend on a fixture's exact bytes, because `npm run fixtures` replaces them, so every
@@ -52,44 +53,10 @@ const EXPIRED = { notBefore: "2025-01-01T00:00:00Z", notAfter: "2025-04-01T00:00
 const ZERO = { notBefore: "2026-01-01T00:00:00Z", notAfter: "2026-01-01T00:00:00Z" };
 
 /**
- * Three certificates that OpenSSL's own commands will not write, made once with
- * `openssl asn1parse -genconf <file> -noout -out <name>.der` and then
- * `openssl x509 -inform DER -in <name>.der -outform PEM`. Their signature is not valid, which
- * does not matter for a certificate observed alone. They share this configuration, with
- * `$PUBLIC_KEY` the 65 bytes of a P-256 public point in hexadecimal and `$CN` a common name:
- *
- *     asn1 = SEQUENCE:certificate
- *     [certificate]
- *     tbs = SEQUENCE:tbs
- *     sigalg = SEQUENCE:sigalg
- *     sig = FORMAT:HEX,BITSTRING:3006020101020101
- *     [sigalg]
- *     algorithm = OID:ecdsa-with-SHA256
- *     [tbs]
- *     version = EXPLICIT:0,INTEGER:2
- *     serial = INTEGER:5
- *     sigalg = SEQUENCE:sigalg
- *     issuer = SEQUENCE:name
- *     validity = SEQUENCE:validity
- *     subject = SEQUENCE:name
- *     spki = SEQUENCE:spki
- *     [name]
- *     rdn = SET:rdn
- *     [rdn]
- *     attribute = SEQUENCE:attribute
- *     [attribute]
- *     type = OID:commonName
- *     value = UTF8:$CN
- *     [spki]
- *     algorithm = SEQUENCE:ecalgorithm
- *     key = FORMAT:HEX,BITSTRING:$PUBLIC_KEY
- *     [ecalgorithm]
- *     id = OID:id-ecPublicKey
- *     curve = OID:prime256v1
- *
- * and differ in the `[validity]` section and in the extensions, as each constant says.
+ * Some of the certificates below are ones that OpenSSL's own commands will not write, made once
+ * from the configuration in `test/helpers/certificates.js`, which each of them says how it differs
+ * from. Their signature is not valid, which does not matter for a certificate observed alone.
  */
-
 // CN badtime. openssl refuses to write 30 February as a time, so it is written as an octet
 // string with the tag of a GeneralizedTime:
 //     [validity]
@@ -168,45 +135,6 @@ const TWO_EKU_EXTENSIONS = [
     "r+/PrHw2Ppd2eWwpeBR+3maso/+vWlkyCczbIc7Xo+pwZmmZ/eV+4n/DwjTqRvFS",
     "oywwKjATBgNVHSUEDDAKBggrBgEFBQcDATATBgNVHSUEDDAKBggrBgEFBQcDAjAK",
     "BggqhkjOPQQDAgMJADAGAgEBAgEB",
-    "-----END CERTIFICATE-----",
-    "",
-].join("\n");
-
-// CN empty. An Extended Key Usage extension that is present and lists nothing: its value is an
-// empty SEQUENCE. Made like TWO_EKU_EXTENSIONS, a P-256 public key, a dummy signature and these
-// validity dates, with the extensions section
-//     exts = EXPLICIT:3,SEQUENCE:extensions
-//     [extensions]
-//     first = SEQUENCE:first
-//     [first]
-//     id = OID:extendedKeyUsage
-//     value = OCTWRAP,SEQUENCE:none
-//     [none]
-// Node.js shows an empty list of usages, which is not what it shows for an absent extension.
-const EMPTY_EKU_EXTENSION = [
-    "-----BEGIN CERTIFICATE-----",
-    "MIHgMIHGoAMCAQICAQUwCgYIKoZIzj0EAwIwEDEOMAwGA1UEAwwFZW1wdHkwIhgP",
-    "MjAyNjAxMDEwMDAwMDBaGA8yMDM2MDEwMTAwMDAwMFowEDEOMAwGA1UEAwwFZW1w",
-    "dHkwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQQiZ7oZMRUj6A7SB6Ta1KrK9hH",
-    "+IyfBmhks4yd09UTb1BumVKCLa1+FZ1/DpZ3dfp2+olhO9P71WvGLZK7jvzDow0w",
-    "CzAJBgNVHSUEAjAAMAoGCCqGSM49BAMCAwkAMAYCAQECAQE=",
-    "-----END CERTIFICATE-----",
-    "",
-].join("\n");
-
-// CN undecodable. An Extended Key Usage extension whose value is an INTEGER where a SEQUENCE of
-// usages belongs. Made like EMPTY_EKU_EXTENSION, with
-//     [first]
-//     id = OID:extendedKeyUsage
-//     value = OCTWRAP,INTEGER:1
-// Node.js gives `undefined` for it, the same as for an absent extension.
-const UNDECODABLE_EKU_EXTENSION = [
-    "-----BEGIN CERTIFICATE-----",
-    "MIHtMIHToAMCAQICAQUwCgYIKoZIzj0EAwIwFjEUMBIGA1UEAwwLdW5kZWNvZGFi",
-    "bGUwIhgPMjAyNjAxMDEwMDAwMDBaGA8yMDM2MDEwMTAwMDAwMFowFjEUMBIGA1UE",
-    "AwwLdW5kZWNvZGFibGUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQQiZ7oZMRU",
-    "j6A7SB6Ta1KrK9hH+IyfBmhks4yd09UTb1BumVKCLa1+FZ1/DpZ3dfp2+olhO9P7",
-    "1WvGLZK7jvzDow4wDDAKBgNVHSUEAwIBATAKBggqhkjOPQQDAgMJADAGAgEBAgEB",
     "-----END CERTIFICATE-----",
     "",
 ].join("\n");

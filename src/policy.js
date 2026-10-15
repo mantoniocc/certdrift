@@ -1,4 +1,5 @@
 import { canonicalAddress } from "./san.js";
+import { dataOf, isPlain } from "./json.js";
 import { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 
 // The shape check of a policy, written by hand: the package has no JSON Schema validator at run
@@ -40,24 +41,44 @@ const SEVERITIES = ["fail", "warn"];
 /** @typedef {"none" | "duration" | "fraction" | "usages" | "names" | "sha256" | "end-entity"} ValueKind */
 
 /**
- * The entries of a policy and what each takes as `value` (`none` for an entry that has only a
- * severity), in the order they are written everywhere: the schema, the serializer, the README and
- * the results.
- * @type {readonly (readonly [string, ValueKind])[]}
+ * The entries of a policy, what each takes as `value` (`none` for an entry that has only a
+ * severity) and the reason codes each one produces, in the order they are written everywhere: the
+ * schema, the serializer, the README and the results. The first code of an entry is the one its
+ * result carries when the rule holds.
+ * @type {readonly (readonly [string, ValueKind, readonly string[]])[]}
  */
-export const ENTRIES = Object.freeze(/** @type {(readonly [string, ValueKind])[]} */ ([
-    ["validityStarted", "none"],
-    ["validityNotEnded", "none"],
-    ["expiresWithin", "duration"],
-    ["maxLifetimeUsed", "fraction"],
-    ["expectEku", "usages"],
-    ["ekuAllows", "usages"],
-    ["rejectEku", "usages"],
-    ["expectSan", "names"],
-    ["expectFingerprint", "sha256"],
-    ["expectKind", "end-entity"],
-    ["matchesPrivateKey", "none"],
+export const ENTRIES = Object.freeze(/** @type {(readonly [string, ValueKind, readonly string[]])[]} */ ([
+    ["validityStarted", "none", ["NOT_YET_VALID"]],
+    ["validityNotEnded", "none", ["EXPIRED"]],
+    ["expiresWithin", "duration", ["EXPIRES_SOON"]],
+    ["maxLifetimeUsed", "fraction", ["LIFETIME_USED_EXCEEDED"]],
+    ["expectEku", "usages", ["EKU_MISSING"]],
+    ["ekuAllows", "usages", ["EKU_NOT_PERMITTED"]],
+    ["rejectEku", "usages", ["EKU_FORBIDDEN"]],
+    ["expectSan", "names", ["SAN_MISSING"]],
+    ["expectFingerprint", "sha256", ["FINGERPRINT_MISMATCH"]],
+    ["expectKind", "end-entity", ["TARGET_NOT_END_ENTITY"]],
+    ["matchesPrivateKey", "none", ["KEY_MISMATCH", "KEY_UNREADABLE"]],
 ]));
+
+/** @type {Map<string, string>} */
+const ENTRY_OF_CODE = new Map(ENTRIES.flatMap(([entry, , codes]) => codes.map((code) => [code, entry])));
+
+/**
+ * The entry of a policy that produces a reason code, for example `validityNotEnded` for `EXPIRED`,
+ * and `null` for a code that has no entry: `POLICY_EMPTY`, `RULE_ERROR`, a code this version does
+ * not know and anything that is not text.
+ *
+ * It answers for the library's codes. A rule of the caller's own may use any of them too, so a
+ * result's code does not say where it came from: its `rule.name` does. A caller that has
+ * results from both has to look at the name before asking for the entry.
+ * @param {unknown} code
+ * @returns {string | null}
+ */
+export function entryOfCode(code) {
+    // A map never finds a key that is not the same text, so what is not text finds nothing.
+    return ENTRY_OF_CODE.get(/** @type {string} */ (code)) ?? null;
+}
 
 /**
  * How an `expectSan` item is read: an IP address exactly when `canonicalAddress` accepts it, which
@@ -174,17 +195,6 @@ function nonEmptyList(value, accepts) {
 }
 
 /**
- * Whether a value is an object JSON can hold: plain (or with no prototype) and not an array.
- * @param {unknown} value
- * @returns {value is Record<string, unknown>}
- */
-function isPlain(value) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-    const prototype = Object.getPrototypeOf(value);
-    return prototype === Object.prototype || prototype === null;
-}
-
-/**
  * Whether an own property is a data property, as opposed to an accessor, without calling it.
  * @param {Record<string, unknown>} object
  * @param {string} key
@@ -192,16 +202,6 @@ function isPlain(value) {
 function isData(object, key) {
     const descriptor = Object.getOwnPropertyDescriptor(object, key);
     return descriptor !== undefined && "value" in descriptor;
-}
-
-/**
- * The value of an own data property, without calling an accessor. `undefined` for an accessor.
- * @param {Record<string, unknown>} object
- * @param {string} key
- */
-function dataOf(object, key) {
-    const descriptor = Object.getOwnPropertyDescriptor(object, key);
-    return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
 }
 
 /** The most problems listed: a document with thousands of bad values does not need thousands of lines. */

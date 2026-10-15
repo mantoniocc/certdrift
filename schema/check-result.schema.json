@@ -73,7 +73,7 @@
       "required": ["code", "status", "rule", "message"],
       "properties": {
         "code": {
-          "description": "Stable code for programs: capital letters, digits and underscores, starting with a letter. Known values: EKU_MISSING, EKU_NOT_PERMITTED, EKU_FORBIDDEN, SAN_MISSING, FINGERPRINT_MISMATCH, EXPIRED, NOT_YET_VALID, EXPIRES_SOON, LIFETIME_USED_EXCEEDED, KEY_MISMATCH, KEY_UNREADABLE, TARGET_NOT_END_ENTITY, POLICY_EMPTY. A rule of the consumer's own chooses its own. Tolerate unknown values. Codes are versioned with the contract: adding one is additive, and changing what one means requires a new contract number.",
+          "description": "Stable code for programs: capital letters, digits and underscores, starting with a letter. Known values: EKU_MISSING, EKU_NOT_PERMITTED, EKU_FORBIDDEN, SAN_MISSING, FINGERPRINT_MISMATCH, EXPIRED, NOT_YET_VALID, EXPIRES_SOON, LIFETIME_USED_EXCEEDED, KEY_MISMATCH, KEY_UNREADABLE, TARGET_NOT_END_ENTITY, POLICY_EMPTY, RULE_ERROR. A rule of the consumer's own chooses its own, which may be the code of a rule of the library: the result's rule.name says which rule produced it. Two codes are the library's alone: POLICY_EMPTY, which exists only with rule null, and RULE_ERROR, the library's diagnosis of a rule of the consumer's own that threw, returned something that is not a result or returned a result that cannot be written as JSON. Its status is fail, its rule is the name of the rule that failed, and its message never repeats the text of the error. Tolerate unknown values. Codes are versioned with the contract: adding one is additive, and changing what one means requires a new contract number.",
           "type": "string",
           "pattern": "^[A-Z][A-Z0-9_]*$"
         },

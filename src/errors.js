@@ -34,3 +34,24 @@ export class AmbiguousTargetError extends Error {
         this.candidates = candidates;
     }
 }
+
+/**
+ * The policy given to `evaluate` is not one it can apply: its shape is wrong, its `contract` is not
+ * one this version knows, or it lists an entry that needs an input `evaluate` was not given. That
+ * is misuse of the call, not a failed check, so it is an error and not a result.
+ *
+ * The message says how many problems there are and nothing else: a policy is a document people
+ * share, and a value in the wrong place may be a secret. Each problem has a `path` and a message
+ * that quotes no value of the policy.
+ */
+export class PolicyError extends Error {
+    /**
+     * @param {{ path: string, message: string }[]} problems What is wrong, at least one.
+     */
+    constructor(problems) {
+        super(`the policy is not valid: ${problems.length} problem${problems.length === 1 ? "" : "s"}`);
+        this.name = "PolicyError";
+        /** @type {{ path: string, message: string }[]} */
+        this.problems = problems.map(({ path, message }) => ({ path, message }));
+    }
+}

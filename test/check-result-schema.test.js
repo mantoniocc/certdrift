@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { validatorFor } from "./helpers/schema.js";
-import { inspect, serializeCheckResult, serializeObservation, AmbiguousTargetError } from "../src/index.js";
-import { ENTRIES, sanItem } from "../src/policy.js";
-import { EXTENDED_KEY_USAGE_OIDS } from "../src/usage.js";
+import { evaluate, inspect, serializeCheckResult, serializeObservation, AmbiguousTargetError } from "../src/index.js";
+import { ENTRIES } from "../src/policy.js";
+import { CODE_OF, checked } from "./helpers/rules.js";
 
 const examplesUrl = new URL("../schema/examples/check-result/", import.meta.url);
 const schemaUrl = new URL("../schema/check-result.schema.json", import.meta.url);
@@ -25,22 +25,7 @@ function says(text, pattern) {
 /** @param {string} name */
 const example = (name) => readJson(new URL(name, examplesUrl));
 
-/** The code each entry of the policy produces, which is where a result's `rule` leads back to. */
-const CODE_OF = /** @type {Record<string, string>} */ ({
-    validityStarted: "NOT_YET_VALID",
-    validityNotEnded: "EXPIRED",
-    expiresWithin: "EXPIRES_SOON",
-    maxLifetimeUsed: "LIFETIME_USED_EXCEEDED",
-    expectEku: "EKU_MISSING",
-    ekuAllows: "EKU_NOT_PERMITTED",
-    rejectEku: "EKU_FORBIDDEN",
-    expectSan: "SAN_MISSING",
-    expectFingerprint: "FINGERPRINT_MISMATCH",
-    expectKind: "TARGET_NOT_END_ENTITY",
-    matchesPrivateKey: "KEY_MISMATCH",
-});
-
-const KNOWN_CODES = [...Object.values(CODE_OF), "KEY_UNREADABLE", "POLICY_EMPTY"].sort();
+const KNOWN_CODES = [...Object.values(CODE_OF), "KEY_UNREADABLE", "POLICY_EMPTY", "RULE_ERROR"].sort();
 
 test("the check result schema compiles in strict mode and is draft 2020-12", () => {
     assert.equal(typeof errorsOf, "function");
@@ -51,8 +36,8 @@ test("the check result schema compiles in strict mode and is draft 2020-12", () 
 
 const exampleFiles = readdirSync(examplesUrl).filter((name) => name.endsWith(".json")).sort();
 
-test("the check result examples cover a pass, a failure and a warning at another instant, an empty policy, an absent and an empty Extended Key Usage, an own rule and both key codes", () => {
-    for (const name of ["pass.json", "fail-and-warn.json", "empty-policy.json", "eku-absent.json", "eku-empty.json", "own-rule.json", "key-mismatch.json", "key-unreadable.json"]) {
+test("the check result examples cover a pass, a failure and a warning at another instant, an empty policy, an absent and an empty Extended Key Usage, an own rule, a rule that failed and both key codes", () => {
+    for (const name of ["pass.json", "fail-and-warn.json", "empty-policy.json", "eku-absent.json", "eku-empty.json", "own-rule.json", "rule-error.json", "key-mismatch.json", "key-unreadable.json"]) {
         assert.ok(exampleFiles.includes(name), `missing example ${name}`);
     }
 });
@@ -61,64 +46,6 @@ for (const name of exampleFiles) {
     test(`check result example ${name} validates against the schema`, () => {
         assert.deepEqual(errorsOf(example(name)), []);
     });
-}
-
-/** @param {string} iso */
-const seconds = (iso) => Date.parse(iso) / 1000;
-
-/**
- * What a rule says about a certificate, from the dates, the usages and the names alone: what the
- * README's table says makes each code pass. The examples are checked against it so that they
- * cannot show a result the rules would not give.
- * @param {any} result
- * @param {any} entry The entry of the applied policy the result's rule names.
- * @param {any} target
- * @param {string} now
- */
-function checked(result, entry, target, now) {
-    const name = result.rule.name;
-    const nowSeconds = seconds(now);
-    const notBefore = seconds(target.notBefore);
-    const notAfter = seconds(target.notAfter);
-    const listed = (/** @type {string} */ usage) => target.eku?.includes(usage) ?? false;
-    const wanted = (Array.isArray(entry.value) ? entry.value : []).map((/** @type {string} */ usage) => Object.entries(EXTENDED_KEY_USAGE_OIDS).find(([, oid]) => oid === usage)?.[0] ?? usage);
-    switch (name) {
-        case "validityStarted":
-            return { holds: notBefore <= nowSeconds, actual: target.notBefore, expected: now };
-        case "validityNotEnded":
-            return { holds: notAfter >= nowSeconds, actual: target.notAfter, expected: now };
-        case "expiresWithin": {
-            const threshold = Number.parseInt(entry.value) * (entry.value.endsWith("d") ? 86400 : 3600);
-            return { holds: notAfter - nowSeconds >= threshold, actual: notAfter - nowSeconds, expected: threshold };
-        }
-        case "maxLifetimeUsed":
-            return {
-                holds: nowSeconds - notBefore <= entry.value * (notAfter - notBefore),
-                actual: notAfter > notBefore ? (nowSeconds - notBefore) / (notAfter - notBefore) : null,
-                expected: entry.value,
-            };
-        case "expectEku":
-            return { holds: target.eku !== null && wanted.every(listed), actual: target.eku, expected: wanted };
-        case "ekuAllows":
-            return { holds: target.eku === null || wanted.every(listed), actual: target.eku, expected: wanted };
-        case "rejectEku":
-            return { holds: target.eku === null || !wanted.some(listed), actual: target.eku, expected: wanted };
-        case "expectSan": {
-            const items = entry.value.map(sanItem);
-            const expected = {
-                dns: items.filter((/** @type {any} */ item) => item.kind === "dns").map((/** @type {any} */ item) => item.name).sort(),
-                ip: items.filter((/** @type {any} */ item) => item.kind === "ip").map((/** @type {any} */ item) => item.name).sort(),
-            };
-            const holds = expected.dns.every((/** @type {string} */ dns) => target.san.dns.includes(dns)) && expected.ip.every((/** @type {string} */ ip) => target.san.ip.includes(ip));
-            return { holds, actual: { dns: target.san.dns, ip: target.san.ip }, expected };
-        }
-        case "expectFingerprint":
-            return { holds: target.sha256 === entry.value, actual: target.sha256, expected: entry.value };
-        case "expectKind":
-            return { holds: target.kind === "end-entity", actual: target.kind, expected: "end-entity" };
-        default:
-            throw new Error(`no oracle for ${name}`);
-    }
 }
 
 for (const name of exampleFiles) {
@@ -191,6 +118,45 @@ for (const name of exampleFiles) {
         assert.doesNotMatch(JSON.stringify(document), /-----BEGIN [A-Z ]*PRIVATE KEY-----/);
     });
 }
+
+// The examples are what the library writes, so the text of a message is never one nobody produces.
+// Two of them are made with a rule of the caller's own, and two need a private key `evaluate` is not given.
+const OWN_RULES = /** @type {Record<string, Function[]>} */ ({
+    "own-rule.json": [
+        function issuerAllowed() {
+            return { code: "ISSUER_NOT_ALLOWED", status: "fail", rule: { name: "issuerAllowed", value: ["Other CA"] }, message: "the issuer Example Issuing CA 1 is not one of the allowed issuers", actual: "Example Issuing CA 1", expected: ["Other CA"] };
+        },
+    ],
+    "rule-error.json": [
+        function issuerAllowed() {
+            throw new Error("the list of allowed issuers could not be read");
+        },
+    ],
+});
+const NEEDS_A_KEY = ["key-mismatch.json", "key-unreadable.json"];
+
+test("every check result example that does not need a private key is what evaluate writes for its observation, its policy and its instant, byte for byte", () => {
+    assert.deepEqual(exampleFiles.filter((name) => name.startsWith("key-")), NEEDS_A_KEY);
+    let written = 0;
+    for (const name of exampleFiles.filter((file) => !NEEDS_A_KEY.includes(file))) {
+        const document = example(name);
+        const made = evaluate(document.observation, document.policy, { now: document.now, rules: /** @type {any} */ (OWN_RULES[name] ?? []) });
+        assert.equal(serializeCheckResult(made), readFileSync(new URL(name, examplesUrl), "utf8"), name);
+        written += 1;
+    }
+    assert.equal(written, exampleFiles.length - 2);
+});
+
+test("the example of a rule that failed validates, and is what evaluate writes for a rule that throws: RULE_ERROR, fail, under the rule's name, with the check going on", () => {
+    const document = example("rule-error.json");
+    assert.deepEqual(errorsOf(document), []);
+    assert.deepEqual(document.results.map((/** @type {any} */ result) => `${result.code} ${result.status}`), ["NOT_YET_VALID pass", "EXPIRED pass", "RULE_ERROR fail"]);
+    assert.deepEqual(document.results[2], { code: "RULE_ERROR", status: "fail", rule: { name: "issuerAllowed" }, message: "the rule threw an error instead of giving a result" });
+    assert.deepEqual(document.summary, { status: "fail", pass: 2, warn: 0, fail: 1 });
+    assert.ok(!JSON.stringify(document).includes("could not be read"), "the text of the error is not repeated");
+    assert.match(schema.$defs.result.properties.code.description, /RULE_ERROR, the library's diagnosis of a rule of the consumer's own that threw/);
+    assert.match(schema.$defs.result.properties.code.description, /its message never repeats the text of the error/i);
+});
 
 test("now is the observation's at in every example except the one that evaluates at another instant", () => {
     const another = [];
