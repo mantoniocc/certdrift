@@ -121,6 +121,12 @@ test("material that is not a certificate is exit 3, an ambiguous bundle is exit 
     const sha256 = inspect(fixture("leaf-rsa.pem")).certificates[0].sha256;
     assert.ok("observation" in observe(fixture("bundle-two-leaves.pem"), { select: sha256.slice(0, 8) }, "bundle"));
 
+    // The line that ends the candidates is the command's to word, for a material that --select does not reach.
+    const choose = observe(fixture("bundle-two-leaves.pem"), {}, "bundle", "A line of the command.");
+    assert.ok("code" in choose && choose.code === 2);
+    assert.match(choose.message, /candidates:\n.*\nA line of the command\.\n$/s);
+    assert.doesNotMatch(choose.message, /--select/);
+
     // What the material holds is shown escaped, in both messages.
     const label = observe(Buffer.from("-----BEGIN CERTIFICATE\u202e-----\nQUJD\n-----END CERTIFICATE\u202e-----\n"), {}, `in${ESC}put`);
     assert.ok("code" in label && label.code === 3);

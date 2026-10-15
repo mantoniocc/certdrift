@@ -7,6 +7,7 @@ import { entryOfCode, evaluate, inspect, serializeCheckResult } from "../src/ind
 import { CHECK_OPTIONS, exitOf, nowOf, presentCheck } from "../bin/check.js";
 import { CWD, fixture, run, runMain, targetOf, typed } from "./helpers/command.js";
 import { validatorFor } from "./helpers/schema.js";
+import { serveChain } from "./helpers/tls.js";
 
 // The command is run as a child process, the way a person runs it. It always evaluates at the real
 // current time unless --as-of says otherwise, and the fixtures' validity dates move with the day
@@ -133,8 +134,8 @@ test("every flag check takes is accepted, and the ones that can be repeated add 
     assert.match(help.stdout, /^certdrift check decides/);
 });
 
-test("check has no --query, --host, --servername, --timeout or --verbose: each is an unknown option and misuse", async () => {
-    for (const flags of [["--query", "observation.at"], ["--host", "example.com"], ["--servername", "example.com"], ["--timeout", "5"], ["--verbose"], ["-v"]]) {
+test("check has no --query or --verbose: each is an unknown option and misuse", async () => {
+    for (const flags of [["--query", "observation.at"], ["--verbose"], ["-v"]]) {
         const result = await check([...flags, "--reject-eku", "codeSigning", typed("leaf-p256.pem")]);
         assert.deepEqual([flags.join(" "), result.code, result.stdout], [flags.join(" "), 2, ""]);
         assert.match(result.stderr, new RegExp(`^certdrift: Unknown option '${flags[0]}'`), flags.join(" "));
@@ -182,7 +183,7 @@ test("no path, two paths, an empty --select and a flag in place of the value are
         const result = await check(args);
         assert.deepEqual([args.join(" "), result.code, result.stdout], [args.join(" "), 2, ""]);
         assert.match(result.stderr, message, args.join(" "));
-        assert.match(result.stderr, /Usage: certdrift check .*<path \| ->\nRun certdrift check --help for the options\.\n$/s);
+        assert.match(result.stderr, /Usage: certdrift check .*<path \| ->\n {7}certdrift check .*--host <host\[:port\]>\nRun certdrift check --help for the options\.\n$/s);
     }
 });
 
@@ -1097,7 +1098,8 @@ test("certdrift check --help lists exactly the flags check takes, each with its 
     assert.match(help.stdout, /NO_COLOR/);
     assert.match(help.stdout, /^Usage: certdrift check .*<path \| ->$/m);
     assert.match(help.stdout, /POLICY_EMPTY/);
-    assert.doesNotMatch(help.stdout, /--query|--host|--servername|--timeout|--verbose/);
+    assert.doesNotMatch(help.stdout, /--query|--verbose/);
+    assert.match(help.stdout, /^Usage: certdrift check .*<path \| ->\n {7}certdrift check .*--host <host\[:port\]>$/m);
     // inspect never exits 1, so its own help does not list it.
     const inspectHelp = await run(["inspect", "--help"]);
     assert.doesNotMatch(inspectHelp.stdout, /^ {2}1 {2}/m);
@@ -1117,7 +1119,7 @@ test("an unknown command is misuse and names the two that exist, and misuse of e
     }
 
     const check_ = await check([]);
-    assert.match(check_.stderr, /^certdrift: no path given; use "-" to read standard input\nUsage: certdrift check .*\nRun certdrift check --help for the options\.\n$/);
+    assert.match(check_.stderr, /^certdrift: no path given; use "-" to read standard input\nUsage: certdrift check .*\n {7}certdrift check .*--host <host\[:port\]>\nRun certdrift check --help for the options\.\n$/);
     assert.doesNotMatch(check_.stderr, /certdrift inspect/);
     const inspected = await run(["inspect"]);
     assert.match(inspected.stderr, /^certdrift: no path given; .*\nUsage: certdrift inspect .*\n.*\nRun certdrift inspect --help for the options\.\n$/s);
@@ -1207,19 +1209,25 @@ test("the README examples of check run against fixtures and end with an exit cod
     const dir = scratch(t);
     // What the files named in the README stand for.
     writeFileSync(join(dir, "server.pem"), fixture("leaf-p256.pem"));
+    writeFileSync(join(dir, "fullchain.pem"), Buffer.concat([fixture("leaf-p256.pem"), fixture("intermediate.pem")]));
+    // The host an example names is not reached: it is swapped for a local server that sends this chain.
+    const server = await serveChain(t, { certs: ["leaf-p256.pem", "intermediate.pem"] });
     writeFileSync(join(dir, "policy.json"), readFileSync(policyUrl("server")));
     writeFileSync(join(dir, "server.key"), fixture("leaf-p256.key"));
     writeFileSync(join(dir, "encrypted.key"), fixture("leaf-p256.pkcs8-encrypted.key"));
     const env = { SERVER_KEY_PASSPHRASE: readFileSync(new URL("fixtures/test-only-passphrase.txt", import.meta.url), "utf8").replace(/\n$/, "") };
     const sh = [...checkSection().matchAll(/```sh\n([\s\S]*?)```/g)].flatMap((block) => block[1].split("\n")).filter((line) => line.startsWith("certdrift check"));
     assert.ok(sh.length >= 5, `the README has ${sh.length} examples of check`);
+    assert.ok(sh.some((line) => line.includes("--host") && line.includes("--expect-fingerprint-of")), "the README confirms an installation with --host and --expect-fingerprint-of");
 
     for (const line of sh) {
         const redirect = /^(.*) < (\S+)$/.exec(line);
         const words = (redirect === null ? line : redirect[1]).split(" ").slice(1);
+        const hosted = words.indexOf("--host");
         for (const word of words) assert.doesNotMatch(word, /['"$|;&]/, `the example ${line} uses only plain words`);
         const files = words.filter((word) => /\.(pem|json|key)$/.test(word));
-        for (const file of files) assert.ok(["server.pem", "policy.json", "server.key", "encrypted.key"].includes(file), `${line} names ${file}, which this test does not know`);
+        for (const file of files) assert.ok(["server.pem", "fullchain.pem", "policy.json", "server.key", "encrypted.key"].includes(file), `${line} names ${file}, which this test does not know`);
+        if (hosted !== -1) words[hosted + 1] = `127.0.0.1:${server.port}`;
         const result = await run(words, { cwd: dir, env, ...(redirect === null ? {} : { input: readFileSync(join(dir, redirect[2])) }) });
         assert.ok(result.code === 0 || result.code === 1, `${line}: exit ${result.code}\n${result.stderr}`);
         if (words.includes("--json")) assert.deepEqual(errorsOf(JSON.parse(result.stdout)), [], line);

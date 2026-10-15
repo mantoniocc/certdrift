@@ -110,6 +110,12 @@ const OUTCOMES = [
     { what: "the traditional encrypted key is given as the path of the certificate", args: [...base, typed("leaf-rsa.pkcs1-encrypted.key")], code: 3 },
     { what: "the key is given as the certificate and as the key", args: [...base, "--key", typed("leaf-p256.key"), typed("leaf-p256.key")], code: 3 },
     { what: "the key is given as the certificate on standard input", args: [...base, "-"], code: 3, input: fixture("leaf-p256.pkcs8-encrypted.key") },
+    { what: "the key is given as --expect-fingerprint-of", args: [...base, "--expect-fingerprint-of", typed("leaf-p256.key"), CERT], code: 3 },
+    { what: "the encrypted key is given as --expect-fingerprint-of", args: [...base, "--expect-fingerprint-of", typed("leaf-p256.pkcs8-encrypted.key"), CERT], code: 3 },
+    { what: "the traditional encrypted key is given as --expect-fingerprint-of", args: [...base, "--expect-fingerprint-of", typed("leaf-rsa.pkcs1-encrypted.key"), RSA], code: 3 },
+    { what: "the truncated key is given as --expect-fingerprint-of", args: [...base, "--expect-fingerprint-of", typed("leaf-rsa.truncated.key"), RSA], code: 3 },
+    { what: "the key is given as --expect-fingerprint-of on standard input", args: [...base, "--expect-fingerprint-of", "-", CERT], code: 3, input: fixture("leaf-p256.key") },
+    { what: "the key is given as --expect-fingerprint-of and as --key", args: [...base, "--expect-fingerprint-of", typed("leaf-p256.key"), "--key", typed("leaf-p256.key"), CERT], code: 3 },
     { what: "the key is given as --policy", args: [...base, "--policy", typed("leaf-p256.key"), CERT], code: 3 },
     { what: "the encrypted key is given as --policy", args: [...base, "--policy", typed("leaf-p256.pkcs8-encrypted.key"), CERT], code: 3 },
     { what: "the traditional encrypted key is given as --policy", args: [...base, "--policy", typed("leaf-rsa.pkcs1-encrypted.key"), RSA], code: 3 },
@@ -120,6 +126,7 @@ const OUTCOMES = [
     ...VARIANTS.flatMap(([name, path]) => [
         { what: `${name}, given as the path of the certificate`, args: [...base, path], code: 3 },
         { what: `${name}, given as --policy`, args: [...base, "--policy", path, CERT], code: 3 },
+        { what: `${name}, given as --expect-fingerprint-of`, args: [...base, "--expect-fingerprint-of", path, CERT], code: 3 },
     ]),
 ];
 
@@ -191,6 +198,9 @@ test("a key given where a policy or a certificate goes is exit 3 with a fixed me
         const asPolicy = await run(["check", ...base, "--policy", path, CERT]);
         assert.equal(asPolicy.code, 3, name);
         assert.match(asPolicy.stderr, /^certdrift: .*: the policy is not valid JSON\n$/, name);
+        const asFingerprintFile = await run(["check", ...base, "--expect-fingerprint-of", path, CERT]);
+        assert.equal(asFingerprintFile.code, 3, name);
+        assert.match(asFingerprintFile.stderr, /^certdrift: .*: the material holds no certificate/, name);
         const asCertificate = await run(["check", ...base, path]);
         assert.equal(asCertificate.code, 3, name);
         assert.match(asCertificate.stderr, /^certdrift: .*: the material holds no certificate/, name);

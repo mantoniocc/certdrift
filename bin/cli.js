@@ -133,8 +133,8 @@ Usage: certdrift <command> [options]
 Commands:
   inspect  Print a certificate and the rest of its chain, or one value of them, from a file, from
            standard input or from a server.
-  check    Decide whether a certificate meets requirements, given as options or as a policy file,
-           and exit 1 when one fails.
+  check    Decide whether a certificate, from a file, from standard input or from a server, meets
+           requirements, given as options or as a policy file, and exit 1 when one fails.
 
 Run certdrift inspect --help or certdrift check --help for the options, the output and the exit
 codes of one command.

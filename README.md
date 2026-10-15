@@ -20,7 +20,7 @@ The path is checked against the schema of the output before anything is read. A 
 
 ## Inspecting a server
 
-`--host` reads the certificates a server sends, not a file, and prints them the way it prints a file. It works with `--verbose`, `--json`, `--quiet`, `--query` and `--select`.
+`--host` reads the certificates a server sends, not a file, and prints them the way it prints a file (`certdrift check --host` checks them against requirements). It works with `--verbose`, `--json`, `--quiet`, `--query` and `--select`.
 
 ```sh
 certdrift inspect --host api.example.com:443
@@ -120,6 +120,22 @@ Set the variable without typing the passphrase in a command, for example with `r
 
 The key and the passphrase never appear on standard output, on standard error or in the JSON, whatever the way the check ends; the message of a failure names the key file's path and nothing of its content. The command only reads the file: the matching is the library's `matchesPrivateKey`, described below. `--key` and `--key-passphrase-env` given twice are misuse, as the other options that take one value are.
 
+### A server
+
+After a certificate is installed, what matters is what the server actually serves. `--host <host[:port]>` makes `check` read the certificates a server sends instead of a file, and apply the same requirements to them. It takes every option of `check` on a file, and `--servername` and `--timeout` as `inspect --host` does. The certificate the connection is about is chosen as `inspect --host` chooses it, and `--select` works as it does there.
+
+```sh
+certdrift check --host api.example.com:443 --expect-fingerprint-of fullchain.pem --expect-san api.example.com --expires-within 30d
+```
+
+`--expect-fingerprint-of <file>` requires the certificate the server serves to be the one in the file: the file is read as a certificate is, and the SHA-256 of its target is the fingerprint the rule `expectFingerprint` asks for. It fills the same rule as `--expect-fingerprint`, so the two together are exit 2, and so is one of them with a policy file that has the entry. A file that cannot be read, or that holds no certificate, is exit 3. A file with several certificates that could be the one it is about is exit 2 and lists them; `--select` chooses only in what the host sends, and does not choose in this file. Without `--host` it compares the certificate of one file with that of another.
+
+The host is a name or an address, with the port after a colon, 443 unless given. An IPv6 address is written in brackets, and the argument quoted because a shell reads brackets as a pattern. The host is always given with `--host`, so `--host` takes no path and no `-`. The rules about `--host`, `--servername` and `--timeout` are those of `inspect --host`: a flag of the three given twice, `--servername` or `--timeout` without `--host`, and a `--timeout` that is not a positive whole number of milliseconds are exit 2 and are reported before the host is contacted. A host that cannot be reached, one that refuses the connection, one that does not speak TLS and one that does not answer in time each exit with code 3, with the message of `inspect --host`, the hint about `--servername` for an IP address included.
+
+Every file an option names (`--policy`, `--key` and `--expect-fingerprint-of`) is read before the host is contacted. With `--host` nothing is read from standard input unless an option asks: `--policy -` or `--expect-fingerprint-of -` may, but not both, because standard input is read once.
+
+The readable output, `--json`, `--quiet`, `--as-of` and the exit codes are those of a file. The first line names the host as `host:port`, and the `source` of the observation in `--json` is `{ "kind": "host", "ref": …, "servername": … }`.
+
 ### The instant
 
 `--as-of <date>` evaluates the rules at another instant than now. It is `YYYY-MM-DD`, which is that day at 00:00:00 UTC, or a timestamp in the form the contract writes, with the `Z`. Anything else, a date that does not exist such as `2026-02-30`, and a year outside 0 to 9999 is exit 2. It never changes the observation's `at`, and the first line of the readable output says the instant used.
@@ -134,11 +150,11 @@ certdrift check --as-of 2026-03-01 --expect-eku serverAuth server.pem
 certdrift check --json --reject-eku codeSigning - < server.pem
 ```
 
-`-` is the certificate, or the policy with `--policy -`, but not both: standard input is read once.
+`-` is the certificate, the policy with `--policy -`, or the certificate of `--expect-fingerprint-of -`, but only one of them: standard input is read once. With `--host` there is no certificate to read, so one of the other two may use it.
 
 ### Exit codes of `check`
 
-`0` when no result fails (a warning does not), `1` when one does, `2` for misuse, an invalid policy or an ambiguous bundle, `3` when the certificate, the key file or the policy file cannot be read or the material is not a certificate, and `4` when the command crashes. The table below has them all.
+`0` when no result fails (a warning does not), `1` when one does, `2` for misuse, an invalid policy or an ambiguous bundle, `3` when the certificate, the key file, the policy file or the file of `--expect-fingerprint-of` cannot be read, the material is not a certificate, or the host cannot be reached, refuses the connection, does not speak TLS or does not answer in time, and `4` when the command crashes. The table below has them all.
 
 ## Exit codes
 
@@ -146,8 +162,8 @@ certdrift check --json --reject-eku codeSigning - < server.pem
 |---|---|
 | `0` | Success. For `certdrift check`, no result failed. |
 | `1` | A check failed: `certdrift check` has a result that is `FAIL`, a key that is not the certificate's or cannot be read as a private key (`KEY_UNREADABLE`) included. `inspect` never gives it. |
-| `2` | Misuse, a `--query` path the schema does not declare, a policy that is not valid (one that lists `matchesPrivateKey` with no `--key` included), or a bundle whose certificate is ambiguous (the candidates are listed). |
-| `3` | The file is missing or unreadable (the policy file and the key file of `check` too), the policy file is not JSON, the material is not a certificate, or the host cannot be reached, refuses the connection, does not speak TLS or does not answer in time. |
+| `2` | Misuse, a `--query` path the schema does not declare, a policy that is not valid (one that lists `matchesPrivateKey` with no `--key` included), or a bundle whose certificate is ambiguous (the candidates are listed, and so are those of the file of `--expect-fingerprint-of`). |
+| `3` | The file is missing or unreadable (the policy file, the key file and the file of `--expect-fingerprint-of` of `check` too), the policy file is not JSON, the material is not a certificate, or the host cannot be reached, refuses the connection, does not speak TLS or does not answer in time. |
 | `4` | The command crashed: an error it did not expect, which is a bug. The error is printed on standard error as it is, even with `--quiet`. |
 
 A fault that kills Node.js with a signal cannot be caught, and the shell then reports a code of its own, for example 134 or 139.
