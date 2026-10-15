@@ -1008,17 +1008,17 @@ test("exit codes: 0 on success, 2 on misuse or ambiguity, 3 when the file is mis
     }
 });
 
-test("a message about a file names it, and the usage message names the flags that exist", async () => {
+test("a message about a file names it, and the inspect help lists the flags that exist and the exit codes", async () => {
     const missing = await run(["inspect", "no-such-file.pem"]);
     assert.match(missing.stderr, /^certdrift: cannot read no-such-file\.pem: ENOENT/);
     const text = await run(["inspect", "-"], { input: "hello" });
     assert.match(text.stderr, /^certdrift: standard input: the material holds no certificate/);
 
-    const help = await run(["--help"]);
+    const help = await run(["inspect", "--help"]);
     // Each flag has its own line in the options list, with its short form where it has one.
     for (const [name, option] of Object.entries(INSPECT_OPTIONS)) {
         const short = "short" in option ? `-${option.short}, ` : "";
-        assert.match(help.stdout, new RegExp(`^  ${short}--${name}[ \\n]`, "m"), `--help lists ${short}--${name}`);
+        assert.match(help.stdout, new RegExp(`^  ${short}--${name}[ \\n]`, "m"), `inspect --help lists ${short}--${name}`);
     }
     for (const code of [0, 2, 3]) assert.match(help.stdout, new RegExp(`^  ${code}  `, "m"));
     assert.match(help.stdout, /NO_COLOR/);
@@ -1336,7 +1336,7 @@ test("--query checks the path against the schema before reading anything: an unk
 
     // Misuse says how to fix it, like the rest of the command.
     assert.match(unknown.stderr, /Usage: certdrift inspect .*--query <path>/);
-    assert.match(unknown.stderr, /Run certdrift --help for the options\.\n$/);
+    assert.match(unknown.stderr, /Run certdrift inspect --help for the options\.\n$/);
 });
 
 test("--query with an index out of range on a valid path exits 0, prints nothing and says so on stderr", async () => {
@@ -1512,10 +1512,9 @@ function spawnCopy(script, args, cwd) {
     });
 }
 
-test("the help text and the README say: to extract a value, --query; to make a decision, the checking command", async () => {
-    const help = (await run(["--help"])).stdout.replace(/\s+/g, " ");
-    // "the checking command" is how both say it until that command exists, and `certdrift check` is how they will.
-    const rule = /To extract a value, use (--query)\. To make a decision, use (the checking command|certdrift check)/;
+test("the inspect help and the README say: to extract a value, --query; to make a decision, certdrift check", async () => {
+    const help = (await run(["inspect", "--help"])).stdout.replace(/\s+/g, " ");
+    const rule = /To extract a value, use (--query)\. To make a decision, use (certdrift check)/;
     assert.match(help, rule);
     assert.match(readme(), rule);
 
@@ -1527,8 +1526,8 @@ test("the help text and the README say: to extract a value, --query; to make a d
     assert.match(readme(), /The package published on npm is a placeholder\.\*\* Version 0\.0\.1 exists only to reserve the name/);
 });
 
-test("the help says a field the contract tolerates but the schema does not declare does not exist for --query, and the walk rejects one present in a document", async () => {
-    const help = (await run(["--help"])).stdout.replace(/\s+/g, " ");
+test("the inspect help says a field the contract tolerates but the schema does not declare does not exist for --query, and the walk rejects one present in a document", async () => {
+    const help = (await run(["inspect", "--help"])).stdout.replace(/\s+/g, " ");
     assert.match(help, /A field the contract tolerates but the schema does not declare does not exist for --query/);
     assert.match(readme(), /A field the contract tolerates but the schema does not declare does not exist for --query/);
 
@@ -2251,8 +2250,8 @@ test("a server that sends several end-entity certificates exits 2 listing the ca
     assert.match(none.stderr, /matches no candidate/);
 });
 
-test("the help and the README describe --host, --servername and --timeout, and exit 3 covers a host", async () => {
-    const help = (await run(["--help"])).stdout;
+test("the inspect help and the README describe --host, --servername and --timeout, and exit 3 covers a host", async () => {
+    const help = (await run(["inspect", "--help"])).stdout;
     for (const flag of ["--host <host[:port]>", "--servername <name>", "--timeout <ms>"]) {
         assert.ok(help.split("\n").some((line) => line.startsWith(`  ${flag}  `)), `the options list has ${flag}`);
     }
@@ -2525,8 +2524,8 @@ test("no file of bin/ calls process.exit, so the exit code is only ever set with
     assert.deepEqual(files.filter((path) => CALL.test(readFileSync(new URL(`bin/${path}`, root), "utf8"))), []);
 });
 
-test("exit codes 0, 2 and 3 and what each one means do not change: the help words them as before, and each is still given with no crash report", async () => {
-    const help = (await run(["--help"])).stdout;
+test("exit codes 0, 2 and 3 and what each one means do not change: the inspect help words them as before, and each is still given with no crash report", async () => {
+    const help = (await run(["inspect", "--help"])).stdout;
     assert.ok(
         help.includes(
             [
@@ -2555,8 +2554,8 @@ test("exit codes 0, 2 and 3 and what each one means do not change: the help word
     }
 });
 
-test("the help lists exit code 4, and the README has a table of exit codes that lists exactly 0, 2, 3 and 4 and says a fault that kills Node.js with a signal can not be caught", async () => {
-    const help = (await run(["--help"])).stdout;
+test("the inspect help lists exit code 4, and the README has a table of exit codes that lists exactly 0 to 4 and says a fault that kills Node.js with a signal can not be caught", async () => {
+    const help = (await run(["inspect", "--help"])).stdout;
     assert.match(help, /^ {2}4 {2}The command crashed: an error it did not expect, which is a bug\./m);
     assert.match(help.replace(/\s+/g, " "), /The error is printed on standard error as it is, even with --quiet\./);
 
@@ -2564,7 +2563,7 @@ test("the help lists exit code 4, and the README has a table of exit codes that 
     const start = text.indexOf("\n## Exit codes\n");
     assert.notEqual(start, -1, "the README has an Exit codes section");
     const section = text.slice(start + 1, text.indexOf("\n## ", start + 1));
-    assert.deepEqual([...section.matchAll(/^\| `(\d+)` \|/gm)].map((match) => match[1]), ["0", "2", "3", "4"]);
+    assert.deepEqual([...section.matchAll(/^\| `(\d+)` \|/gm)].map((match) => match[1]), ["0", "1", "2", "3", "4"]);
     const flat = section.replace(/`/g, "").replace(/\s+/g, " ");
     assert.match(flat, /A fault that kills Node\.js with a signal cannot be caught, and the shell then reports a code of its own, for example 134 or 139\./);
     assert.match(flat, /The command crashed: an error it did not expect, which is a bug\. The error is printed on standard error as it is, even with --quiet\./);
@@ -2750,8 +2749,8 @@ test("when several mistakes are made at once, the one reported is the first of a
     assert.equal(server.accepted(), 0, "none of these connected");
 });
 
-test("the options list of --help names exactly the flags inspect takes, so a flag added to the options is a flag added to the help", async () => {
-    const help = (await run(["--help"])).stdout;
+test("the options list of inspect --help names exactly the flags inspect takes, so a flag added to the options is a flag added to the help", async () => {
+    const help = (await run(["inspect", "--help"])).stdout;
     const listed = help.slice(help.indexOf("\nOptions:\n"), help.indexOf("\nInspecting a server:")).split("\n").flatMap((line) => {
         const match = /^ {2}(?:-\w, )?--([a-z]+)[ \n]/.exec(line);
         return match === null ? [] : [match[1]];
