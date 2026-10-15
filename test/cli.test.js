@@ -2379,7 +2379,8 @@ const throwOnConnect = (expression) => preload(`import tls from "node:tls"; tls.
 
 /**
  * Standard output emits each error after the command has put its listener on it, and that listener
- * rethrows anything but EPIPE.
+ * rethrows anything but EPIPE. Run it with `-` and `openStdin`: the command then waits for standard
+ * input, so the error arrives while `main()` is still pending whatever the speed of the machine.
  * @param {string[]} expressions
  */
 const throwFromListener = (...expressions) => preload(`const on = process.stdout.on; process.stdout.on = function (event, listener) { const result = on.call(this, event, listener); if (event === "error") for (const error of [${expressions.join(", ")}]) setImmediate(() => this.emit("error", error)); return result; };`);
@@ -2494,14 +2495,14 @@ test("a crash reports what an error holds beyond its message: the errors of an A
 
 test("--quiet does not silence a crash, whether it comes from a host, from a file or from outside main()", async (t) => {
     const server = await serveChain(t, { certs: SERVED });
-    /** @type {[string, string[], string][]} */
+    /** @type {[string, string[], string, RunOptions][]} */
     const table = [
-        ["a host", ["inspect", "-q", "--host", hostOf(server)], throwOnConnect(bug("while fetching a host"))],
-        ["a file", ["inspect", "--quiet", typed("leaf-p256.pem")], throwOnRead(bug("while reading a file"))],
-        ["outside main()", ["inspect", "-q", typed("leaf-p256.pem")], throwFromListener('Object.assign(new Error("EIO outside main"), { code: "EIO" })')],
+        ["a host", ["inspect", "-q", "--host", hostOf(server)], throwOnConnect(bug("while fetching a host")), {}],
+        ["a file", ["inspect", "--quiet", typed("leaf-p256.pem")], throwOnRead(bug("while reading a file")), {}],
+        ["outside main()", ["inspect", "-q", "-"], throwFromListener('Object.assign(new Error("EIO outside main"), { code: "EIO" })'), { openStdin: true }],
     ];
-    for (const [place, args, preloaded] of table) {
-        assertCrash(await crashing(args, preloaded), /^(?:TypeError: a bug |Error: EIO outside main)/m, place);
+    for (const [place, args, preloaded, options] of table) {
+        assertCrash(await crashing(args, preloaded, options), /^(?:TypeError: a bug |Error: EIO outside main)/m, place);
     }
     // The same command line without a bug prints nothing, so what is printed above is the crash.
     const quiet = await run(["inspect", "-q", "--host", hostOf(server)]);
@@ -2596,7 +2597,7 @@ test("a crash on a path that involves no host, reading a file or reading standar
 test("an error thrown outside main()'s promise, by a listener or by a promise nobody awaits, is reported like any other and exits 4, and only the first one is reported", async () => {
     // The listener the command puts on standard output rethrows an error that is not EPIPE, and a
     // `try` around `main()` never sees it. Nothing the command would print afterwards gets out.
-    const listener = await crashing(["inspect", "--json", typed("leaf-p256.pem")], throwFromListener('Object.assign(new Error("EIO outside main"), { code: "EIO" })'));
+    const listener = await crashing(["inspect", "--json", "-"], throwFromListener('Object.assign(new Error("EIO outside main"), { code: "EIO" })'), { openStdin: true });
     assertCrash(listener, /^Error: EIO outside main$/m, "a listener");
     assert.match(listener.stderr, /^ {2}code: 'EIO'/m);
 
@@ -2612,7 +2613,7 @@ test("an error thrown outside main()'s promise, by a listener or by a promise no
     assert.ok(text.stderr.includes("just some text"), text.stderr);
 
     // The report of the first is the only one: a second error must not add to it or change the code.
-    const twice = await crashing(["inspect", "--json", typed("leaf-p256.pem")], throwFromListener('new Error("EIO number 1")', 'new Error("EIO number 2")'));
+    const twice = await crashing(["inspect", "--json", "-"], throwFromListener('new Error("EIO number 1")', 'new Error("EIO number 2")'), { openStdin: true });
     assertCrash(twice, /^Error: EIO number 1$/m, "the first");
     assert.equal(twice.stderr.includes("EIO number 2"), false, twice.stderr);
 });
@@ -2685,18 +2686,17 @@ test("after a crash the process ends by itself: with standard input left open, w
 const brokenInspect = (onlyCustom) => preload(`import util from "node:util"; import { syncBuiltinESMExports } from "node:module"; const real = util.inspect; util.inspect = (value, options) => { if (${onlyCustom} && options?.customInspect === false) return real(value, options); throw new Error("inspect is broken"); }; syncBuiltinESMExports(); `);
 
 test("a value that can not be inspected is still reported and exits 4, and not the 7 of a handler that throws", async () => {
-    // The error that arrives outside main() is raised while a file is still being read: help would already be printed.
-    /** @type {[string, string[], (expression: string) => string][]} */
+    /** @type {[string, string[], (expression: string) => string, RunOptions][]} */
     const places = [
-        ["inside main()", ["inspect", "--help"], throwOnWrite],
-        ["outside main()", ["inspect", typed("leaf-p256.pem")], (expression) => throwFromListener(expression)],
+        ["inside main()", ["inspect", "--help"], throwOnWrite, {}],
+        ["outside main()", ["inspect", "-"], (expression) => throwFromListener(expression), { openStdin: true }],
     ];
-    for (const [place, args, raise] of places) {
+    for (const [place, args, raise, options] of places) {
         // inspect fails on a custom inspector, so the value is shown the way it is without one.
-        const withoutCustom = await crashing(args, [raise("{ code: 'X' }"), brokenInspect(true)]);
+        const withoutCustom = await crashing(args, [raise("{ code: 'X' }"), brokenInspect(true)], options);
         assert.deepEqual([place, withoutCustom.code, withoutCustom.stdout, withoutCustom.stderr], [place, 4, "", "{ code: 'X' }\n"]);
         // inspect fails whatever it is asked, so a fixed line says that the value can not be shown.
-        const nothing = await crashing(args, [raise("{ code: 'X' }"), brokenInspect(false)]);
+        const nothing = await crashing(args, [raise("{ code: 'X' }"), brokenInspect(false)], options);
         assert.deepEqual([place, nothing.code, nothing.stdout, nothing.stderr], [place, 4, "", "The thrown value cannot be shown: inspecting it throws too.\n"]);
 
         // Real values that make inspect throw on some builds of Node.js and not on others: either way
@@ -2704,7 +2704,7 @@ test("a value that can not be inspected is still reported and exits 4, and not t
         const custom = `{ [Symbol.for("nodejs.util.inspect.custom")]() { throw new Error("custom inspection failed"); } }`;
         const stackGetter = `(() => { const error = new Error("stack getter"); Object.defineProperty(error, "stack", { get() { throw new Error("no stack"); } }); return error; })()`;
         for (const expression of [custom, stackGetter]) {
-            const result = await crashing(args, raise(expression));
+            const result = await crashing(args, raise(expression), options);
             assertCrash(result, /\S/, `${place}: ${expression.slice(0, 40)}`);
         }
     }
