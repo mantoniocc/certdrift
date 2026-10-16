@@ -1,0 +1,74 @@
+{
+  "contract": 1,
+  "identical": false,
+  "before": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "host",
+      "ref": "api.example.com:443",
+      "servername": "api.example.com"
+    }
+  },
+  "after": {
+    "at": "2026-09-15T14:05:40Z",
+    "source": {
+      "kind": "host",
+      "ref": "api.example.com:443",
+      "servername": "api.example.com"
+    }
+  },
+  "changes": [
+    {
+      "field": "issuer.cn",
+      "direction": "changed",
+      "before": "Example Issuing CA 1",
+      "after": "Example Issuing CA 2"
+    },
+    {
+      "field": "issuer.dn",
+      "direction": "changed",
+      "before": "C=US, O=Example Trust, CN=Example Issuing CA 1",
+      "after": "C=US, O=Example Trust, CN=Example Issuing CA 2"
+    },
+    {
+      "field": "serial",
+      "direction": "changed",
+      "before": "5C1E8A3F0B7D4E92A6C8F1D2E3B4A590",
+      "after": "2B7F90A1C4D3E6581A9B0C7D8E4F3A21"
+    },
+    {
+      "field": "notBefore",
+      "direction": "changed",
+      "before": "2026-07-01T00:00:00Z",
+      "after": "2026-09-15T00:00:00Z"
+    },
+    {
+      "field": "notAfter",
+      "direction": "changed",
+      "before": "2026-09-29T00:00:00Z",
+      "after": "2026-12-14T00:00:00Z"
+    },
+    {
+      "field": "sha256",
+      "direction": "changed",
+      "before": "0c9196e013f0d0d1273c1f31c6a7f37beb476b511207f0f15825b9f58ae611e6",
+      "after": "4d7cfeff07ce8782c678b1ed99f3928969b56f2a4927570e3b078f4109fedc42"
+    },
+    {
+      "field": "chain",
+      "direction": "removed",
+      "before": {
+        "position": 0,
+        "sha256": "eae8efb355159e69315d5991dbbe5f266ce41dcea9be52c592ed74261fa1242a"
+      }
+    },
+    {
+      "field": "chain",
+      "direction": "added",
+      "after": {
+        "position": 0,
+        "sha256": "53bca08dd4a80434eceaccaaea5dd9af3d5d5da11b1fcf646d3cd7f8f774d7b3"
+      }
+    }
+  ]
+}

@@ -266,3 +266,56 @@ test("--query prints a string as it is and anything else as compact JSON, with o
     assert.equal(printable({ a: 1, b: { c: ["d é"] } }), '{"a":1,"b":{"c":["d é"]}}\n');
     assert.equal(printable("two\nlines"), "two\nlines\n");
 });
+
+// ---------------------------------------------------------------------------------------------
+// The delta schema
+
+const deltaSchema = JSON.parse(readFileSync(new URL("../schema/delta.schema.json", import.meta.url), "utf8"));
+const deltaExamplesUrl = new URL("../schema/examples/delta/", import.meta.url);
+
+/** @param {string} path */
+const declaredInDelta = (path) => undeclaredAt(deltaSchema, parsePath(path)) === -1;
+
+test("the delta schema declares the paths a consumer reads: identical, the legend of each side and the field, the direction and the sides of a change", () => {
+    for (const path of [
+        "contract", "identical", "before", "after", "changes", "before.at", "after.at",
+        "before.source", "before.source.kind", "before.source.ref", "before.source.servername", "before.source.provider",
+        "after.source.ref", "after.source.servername",
+        "changes[0]", "changes[0].field", "changes[0].direction", "changes[0].before", "changes[0].after", "changes[12].field",
+    ]) {
+        assert.equal(undeclaredAt(deltaSchema, parsePath(path)), -1, path);
+    }
+    for (const path of ["changes.field", "changes[0].fields", "class", "status", "before.derived", "before.observation", "changes[0].code", "identical.x", "before.at.x"]) {
+        assert.ok(!declaredInDelta(path), path);
+    }
+});
+
+test("before.source.ref is declared by the properties beside the $ref to the observation's source, because a $ref to another file is not followed", () => {
+    const without = structuredClone(deltaSchema);
+    delete without.$defs.side.properties.source.properties;
+    // Without them the walk reaches source and stops: the $ref to the other file adds nothing.
+    assert.equal(undeclaredAt(without, parsePath("before.source")), -1);
+    assert.equal(undeclaredAt(without, parsePath("before.source.ref")), 2);
+    assert.equal(undeclaredAt(without, parsePath("before.at")), -1);
+
+    const only = structuredClone(deltaSchema);
+    delete only.$defs.side.properties.source.$ref;
+    assert.equal(undeclaredAt(only, parsePath("before.source.ref")), -1, "the properties alone declare them");
+});
+
+test("the delta examples have every path declared except those inside a side of a change, which the walk cannot enter today", () => {
+    const names = readdirSync(deltaExamplesUrl).filter((name) => name.endsWith(".json")).sort();
+    assert.ok(names.length >= 20, names.join(", "));
+    let inside = 0;
+    for (const name of names) {
+        const document = JSON.parse(readFileSync(new URL(name, deltaExamplesUrl), "utf8"));
+        for (const path of pathsIn(document)) {
+            const insideSide = /^changes\[\d+\]\.(before|after)[.[]/.test(path);
+            if (insideSide) inside += 1;
+            // A change's sides take any JSON value, so there is nothing in the schema to walk into.
+            // The paths up to the side are declared; the ones in it are not.
+            assert.equal(declaredInDelta(path), !insideSide, `${name}: ${path}`);
+        }
+    }
+    assert.ok(inside > 10, `${inside} paths inside a side`);
+});

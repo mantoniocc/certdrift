@@ -333,3 +333,93 @@ Codes are versioned with the contract: adding a code is additive, and changing w
 
 `kind` is the one the observation gives, which is the one Node.js reads. A CA that carries a known extension twice, or one that does not decode, reads as `end-entity`, so `TARGET_NOT_END_ENTITY` passes for it. The observation now carries a `KIND_UNRELIABLE` warning for that certificate.
 <!-- `kind` keeps the value Node.js gives even where a warning says it cannot be trusted, so the limit above holds with or without that warning. -->
+
+## What changed between two observations
+
+A **delta** says what changed between two observations of a certificate. It is JSON with its own `contract` number (`1`), independent of the observation's, the policy's and the check result's. `schema/delta.schema.json` describes it, `schema/examples/delta/` shows deltas that validate, and `serializeDelta(delta)` writes one as text with the keys of the contract in a fixed order, so the same delta always gives the same bytes. The package defines this shape and writes it: it does not compare two observations yet, so a delta is something a program builds or reads.
+
+A delta describes and does not judge. It has no class, no reason code and no status, and it never says whether a change matters: a program reads that from the `field`, the `direction` and the values of each change.
+
+| Field | What it holds |
+|---|---|
+| `contract` | `1`, the delta's own number |
+| `identical` | `true` exactly when the `sha256` of both targets is the same, which is when they are the same certificate. It says nothing about the chain: it can be `true` while `changes` is not empty |
+| `before`, `after` | the `at` and the `source` of each observation, as they are in the observation |
+| `changes` | what differs, in a fixed order |
+
+### Before and after
+
+The first observation given is `before` and the second is `after`, for the whole document. The two objects at the top level are the legend of the changes, and the `direction` of a change reads in the same sense: `removed` means the value was in `before` and is not in `after`. `before` and `after` say nothing about which observation is older: `before.at` can be later than `after.at`.
+
+### Changes
+
+A change is about one field and has a `direction`:
+
+| Field | What it holds |
+|---|---|
+| `field` | a path in the target certificate, as the observation names it (`san.dns`, `eku`, `key.size`, `subject.dn`, `sha256`), or `chain`. Open: a program ignores a field it does not know |
+| `direction` | `added`, `removed` or `changed`. Closed: a program that does not know a direction cannot tell which side holds the value |
+| `before` | the value in `before`. Only for `removed` and `changed` |
+| `after` | the value in `after`. Only for `added` and `changed` |
+
+`null` is a value: `key.size` going from `null` to `2048` is `changed`, with both sides present. A field that is not a set and is not the chain is always `changed`, with the value of the observation on each side. The serial, the validity and the fingerprint are fields like any other: two different certificates always have them in `changes`, and nothing in the shape treats them apart.
+
+A delta does not compare `derived`, which follows from the other fields, or `observation.at`, which says when an observation was made and nothing about the certificate. It does not compare `observation.source` either: that is the legend. `contract`, `format`, `target`, `index` and `issuedBy` are positions inside one observation's material and are not compared, and of the certificates other than the target only the `sha256` counts, as the chain.
+
+```json
+{
+  "contract": 1,
+  "identical": false,
+  "before": { "at": "2026-09-15T14:02:11Z", "source": { "kind": "file", "ref": "deployed.pem" } },
+  "after": { "at": "2026-09-15T14:05:40Z", "source": { "kind": "file", "ref": "renewed.pem" } },
+  "changes": [
+    { "field": "serial", "direction": "changed", "before": "5C1E8A3F0B7D4E92A6C8F1D2E3B4A590", "after": "2B7F90A1C4D3E6581A9B0C7D8E4F3A21" },
+    { "field": "notBefore", "direction": "changed", "before": "2026-07-01T00:00:00Z", "after": "2026-09-15T00:00:00Z" },
+    { "field": "notAfter", "direction": "changed", "before": "2026-09-29T00:00:00Z", "after": "2026-12-14T00:00:00Z" },
+    { "field": "san.dns", "direction": "removed", "before": "old.example.com" },
+    { "field": "san.dns", "direction": "added", "after": "new.example.com" },
+    { "field": "sha256", "direction": "changed", "before": "0c9196e013f0d0d1273c1f31c6a7f37beb476b511207f0f15825b9f58ae611e6", "after": "4d7cfeff07ce8782c678b1ed99f3928969b56f2a4927570e3b078f4109fedc42" }
+  ]
+}
+```
+
+### Sets
+
+A set is a list of the observation whose order means nothing: `san.dns`, `san.ip`, `san.email`, `san.uri` and `eku`. A change in a set names only the element that differs, as a string, and there is one change for each: a name that left and a name that arrived are two independent changes, `removed` and `added`, and the delta never merges them into a replacement. A SAN list is never `changed`.
+
+Sets are compared as sets. An element is `added` or `removed` only when it is in the list of one side and not in the other's, and how many times a list repeats an element is not compared: a certificate that lists `a.example` twice and one that lists it once have no SAN change, because both list `a.example`.
+
+`eku` is the one set that can be `null`. The extension absent (`null`) allows any purpose, and the extension present with no usages (`[]`) allows nothing, so a change between `null` and a list carries the whole value of each side, in one `changed` change, because a change that named only the elements that differ could not say `null`:
+
+```json
+[
+  { "field": "eku", "direction": "changed", "before": ["serverAuth"], "after": null },
+  { "field": "eku", "direction": "changed", "before": null, "after": [] },
+  { "field": "eku", "direction": "changed", "before": [], "after": null },
+  { "field": "eku", "direction": "removed", "before": "clientAuth" }
+]
+```
+
+Read in order: a list to `null` (the extension was removed), `null` to `[]` (it now allows nothing), `[]` to `null` (it allows anything), and a usage that was dropped from a list that still has others. A list that loses all its usages is one `removed` for each of them and is never `null`. A change from one list to another list is never `changed`: it is the `added` and `removed` usages.
+
+### The chain
+
+The chain is the certificates of an observation other than its target, in the order of its `certificates`. A link is `{ "position", "sha256" }`: its `sha256` says which certificate it is, and its `position` is where it is among those certificates, counted from 0 in its own observation, so a link does not depend on where the target is in the material.
+
+- A link whose `sha256` only `before` sends is `removed`, with its position in `before`. A link whose `sha256` only `after` sends is `added`, with its position in `after`.
+- A link replaced by another at the same position is a `removed` and an `added` with the same `position`.
+- The links that both sides send, in another relative order, are one `changed` change. `before` and `after` list their `sha256` in the order of each side, and only those: a link that was added or removed is in neither. A link that moves only because another was added or dropped before it is no change.
+
+```json
+[
+  { "field": "chain", "direction": "removed", "before": { "position": 0, "sha256": "eae8efb355159e69315d5991dbbe5f266ce41dcea9be52c592ed74261fa1242a" } },
+  { "field": "chain", "direction": "added", "after": { "position": 0, "sha256": "53bca08dd4a80434eceaccaaea5dd9af3d5d5da11b1fcf646d3cd7f8f774d7b3" } },
+  { "field": "chain", "direction": "changed", "before": ["3d48201a582773a82a3d50c40f9ac75c25e8b43ce2b05f9fae455f2ad346725b", "f6b9f54ff067a6356c1c6f31186ec54deb798883fbbfa43df4409b855ab09be8"], "after": ["f6b9f54ff067a6356c1c6f31186ec54deb798883fbbfa43df4409b855ab09be8", "3d48201a582773a82a3d50c40f9ac75c25e8b43ce2b05f9fae455f2ad346725b"] }
+]
+```
+
+The chain is about what the server or the file sent, not about the target, so `identical` can be `true` while it changes: the same target sent with its intermediate on one side and without it on the other is identical and still has a chain change.
+
+### Order and bytes
+
+`changes` has a fixed order, so that equal comparisons give equal bytes: the fields in the order the schema lists them in the description of `field` (`kind` first, `chain` last), `removed` before `added` before `changed` for one field, and the elements of a list in the order they have in it. `serializeDelta` keeps the order of `changes` and writes the keys of each object in the order of the examples; a key the contract does not name is kept after them, sorted. A side that is `undefined` is written as absent, as `JSON.stringify` writes any property, so `null` is the only way to write a side whose value is null.

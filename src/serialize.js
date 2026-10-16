@@ -29,14 +29,19 @@ const certificate = {
     },
 };
 
+// When an observation was made and where its material came from. The observation has it under
+// `observation`, and a delta under `before` and `after`, so it is written once.
+/** @type {Shape} */
+const observed = {
+    keys: ["at", "source"],
+    children: { source: { keys: ["kind", "ref", "servername", "provider"] } },
+};
+
 /** @type {Shape} */
 const observation = {
     keys: ["contract", "format", "observation", "target", "certificates", "warnings"],
     children: {
-        observation: {
-            keys: ["at", "source"],
-            children: { source: { keys: ["kind", "ref", "servername", "provider"] } },
-        },
+        observation: observed,
         certificates: { items: certificate },
         warnings: { items: { keys: ["code", "certificate", "message"] } },
     },
@@ -61,6 +66,22 @@ const checkResult = {
             children: Object.fromEntries(ENTRIES.map(([entry]) => [entry, { keys: ["value", "severity"] }])),
         },
         observation,
+    },
+};
+
+// The two sides come first, as the legend of the changes after them. A change's `before` and
+// `after` hold whatever the field holds, so only a link of the chain has keys to order: a value
+// of another kind has none and is written as it is.
+/** @type {Shape} */
+const link = { keys: ["position", "sha256"] };
+
+/** @type {Shape} */
+const delta = {
+    keys: ["contract", "identical", "before", "after", "changes"],
+    children: {
+        before: observed,
+        after: observed,
+        changes: { items: { keys: ["field", "direction", "before", "after"], children: { before: link, after: link } } },
     },
 };
 
@@ -102,6 +123,28 @@ export function serializeCheckResult(value) {
         throw new TypeError("the check result must be an object");
     }
     return `${JSON.stringify(arrange(value, checkResult, "", new Set(), "check result"), null, 2)}\n`;
+}
+
+/**
+ * A delta as the bytes to save, print or compare, written the way `serializeCheckResult` writes a
+ * check result: two-space indentation, one newline at the end, the keys of the contract in a fixed
+ * order, any other key after them and sorted, arrays in the order they have. The `at` and the
+ * `source` of each side are written in the order of the observation's own. The same delta always
+ * gives the same text, whatever order its objects were built in.
+ *
+ * A change that was built with a side set to `undefined` is written without it, as `JSON.stringify`
+ * does for any property: a side that is absent and a side that is `undefined` are the same, and
+ * `null` is the only way to write a side whose value is null.
+ *
+ * @param {import("./index.js").Delta} value
+ * @returns {string}
+ * @throws {TypeError} The argument is not an object, or it contains itself.
+ */
+export function serializeDelta(value) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new TypeError("the delta must be an object");
+    }
+    return `${JSON.stringify(arrange(value, delta, "", new Set(), "delta"), null, 2)}\n`;
 }
 
 /**

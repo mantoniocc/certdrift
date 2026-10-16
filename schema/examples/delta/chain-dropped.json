@@ -1,0 +1,28 @@
+{
+  "contract": 1,
+  "identical": true,
+  "before": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "file",
+      "ref": "fullchain.pem"
+    }
+  },
+  "after": {
+    "at": "2026-09-15T14:02:40Z",
+    "source": {
+      "kind": "file",
+      "ref": "chain-without-intermediate.pem"
+    }
+  },
+  "changes": [
+    {
+      "field": "chain",
+      "direction": "removed",
+      "before": {
+        "position": 0,
+        "sha256": "eae8efb355159e69315d5991dbbe5f266ce41dcea9be52c592ed74261fa1242a"
+      }
+    }
+  ]
+}

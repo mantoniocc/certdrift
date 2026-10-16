@@ -1,0 +1,28 @@
+{
+  "contract": 1,
+  "identical": true,
+  "before": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "file",
+      "ref": "chain.pem"
+    }
+  },
+  "after": {
+    "at": "2026-09-15T14:02:40Z",
+    "source": {
+      "kind": "file",
+      "ref": "chain-with-cross-sign.pem"
+    }
+  },
+  "changes": [
+    {
+      "field": "chain",
+      "direction": "added",
+      "after": {
+        "position": 1,
+        "sha256": "f6b9f54ff067a6356c1c6f31186ec54deb798883fbbfa43df4409b855ab09be8"
+      }
+    }
+  ]
+}

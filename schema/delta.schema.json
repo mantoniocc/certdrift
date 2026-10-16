@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/mantoniocc/certdrift/main/schema/delta.schema.json",
+  "title": "certdrift delta",
+  "description": "What changed between two observations: which observation is each side, whether their targets are the same certificate, and the list of changes. A Delta describes and does not judge: it has no class, no reason code and no status, and it never says whether a change matters or whether it widens or narrows what the certificate allows; that is read from the field, the direction and the values of each change. Not compared: derived, which follows from the other fields of the observation, and observation.at, which says when an observation was made and nothing about the certificate. observation.source is not compared either: it says where each side came from and is the legend of before and after. Neither are contract, format, target, index and issuedBy, which are positions inside the material of one observation; of the certificates other than the target only the sha256 is compared, as the chain. Contract version 1. Consumers must tolerate properties and enum-like values they do not know, except direction, which is closed on purpose (see its description).",
+  "type": "object",
+  "required": ["contract", "identical", "before", "after", "changes"],
+  "properties": {
+    "contract": {
+      "description": "Contract version of the delta, independent of the observation's own contract number. Adding fields keeps 1; renaming, removing or repurposing a field, or changing what a field or a direction means, requires 2.",
+      "const": 1
+    },
+    "identical": {
+      "description": "true exactly when the sha256 of both targets is the same, which is when the two targets are the same certificate. It is about the targets only: it can be true while changes is not empty, because the certificates sent after the target can differ. The same target sent with its intermediate on one side and without it on the other is identical and still has a chain change.",
+      "type": "boolean"
+    },
+    "before": {
+      "description": "The observation that was given first. before and after are the legend of the whole document: the first observation given is before and the second is after, and a change's direction reads in that same sense (removed means it was in before and is not in after). They say nothing about which observation is older: the at of before may be later than the at of after.",
+      "$ref": "#/$defs/side"
+    },
+    "after": {
+      "description": "The observation that was given second. See before.",
+      "$ref": "#/$defs/side"
+    },
+    "changes": {
+      "description": "What differs between the two targets, and between the certificates sent after them. Empty when nothing differs. The order is fixed, so that equal comparisons give equal bytes: the fields in the order of the list in the description of field, chain last; for one field, removed first, then added, then changed; elements in the order of the list they come from, the links of the chain by position. A change is about one field and one element: nothing in the list is a replacement of one change by another.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/change" }
+    }
+  },
+  "$defs": {
+    "side": {
+      "description": "Which observation a side stands for: the instant it was made and where its material came from. Descriptive only: neither is compared.",
+      "type": "object",
+      "required": ["at", "source"],
+      "properties": {
+        "at": {
+          "description": "The observation's own at.",
+          "$ref": "observation.schema.json#/$defs/timestamp"
+        },
+        "source": {
+          "description": "The observation's own source, with the same properties. They are declared here as well as referred to because a path such as before.source.ref is only found where it is declared next to the reference, and the fields that `source` requires for each kind apply as in the observation.",
+          "$ref": "observation.schema.json#/$defs/source",
+          "type": "object",
+          "properties": {
+            "kind": true,
+            "ref": true,
+            "servername": true,
+            "provider": true
+          }
+        }
+      }
+    },
+    "change": {
+      "description": "One difference between the two sides, about one field. The sides it has depend on its direction: added has only after, removed has only before, and changed has both. A value of null is a value: it counts as present. Which side holds which value is the whole meaning of a change, so that a program can read what happened from the field, the direction and the values alone, without comparing anything again.",
+      "type": "object",
+      "required": ["field", "direction"],
+      "properties": {
+        "field": {
+          "description": "The field the change is about, as a path in the target certificate of the observation. Known values: kind, selfSigned, subject.cn, subject.dn, issuer.cn, issuer.dn, serial, notBefore, notAfter, san.dns, san.ip, san.email, san.uri, eku, key.algorithm, key.size, key.curve, sha256, spkiSha256, and chain, which is not a field of the target but the certificates sent after it. Tolerate unknown values. A field that is not a set and is not chain is always changed, with the value of the observation on each side, and null counts as a value: key.size going from null to 2048 is changed, not added. A set is san.dns, san.ip, san.email, san.uri and eku, and a set change names only the element that differs (see value). A change in a set never merges a name that left and a name that arrived into a replacement: they are two changes.",
+          "type": "string",
+          "minLength": 1
+        },
+        "direction": {
+          "description": "added: the field or the element is in after and not in before. removed: it is in before and not in after. changed: it is in both, with another value. Read in the sense of before and after, which says nothing about which is older. Closed on purpose, unlike the open values of the observation: a consumer that does not know a direction cannot tell which side holds the value, so a new direction needs a new contract number.",
+          "enum": ["added", "removed", "changed"]
+        },
+        "before": {
+          "description": "The value in before, where there is one: absent for added. For a set, the element that was removed, as the text the observation lists. For chain, the link that was removed ({ position, sha256 }) or, for changed, the sha256 of the links both sides send, in the order of before. For eku going from a list to null or from null to a list, the whole value of the observation: null, or the list. Otherwise the value of the field in the observation, null included."
+        },
+        "after": {
+          "description": "The value in after, where there is one: absent for removed. See before; the same rules hold for after."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "direction": { "const": "added" } }, "required": ["direction"] },
+          "then": { "properties": { "after": true, "before": false }, "required": ["after"] }
+        },
+        {
+          "if": { "properties": { "direction": { "const": "removed" } }, "required": ["direction"] },
+          "then": { "properties": { "before": true, "after": false }, "required": ["before"] }
+        },
+        {
+          "if": { "properties": { "direction": { "const": "changed" } }, "required": ["direction"] },
+          "then": { "properties": { "before": true, "after": true }, "required": ["before", "after"] }
+        },
+        {
+          "description": "A SAN list is a set. It is compared as a set: an element is added or removed only when it is in the list of one side and not in the other's, and how many times a list repeats an element is not compared, so [\"a.example\", \"a.example\"] on one side and [\"a.example\"] on the other is no change at all. Each element that differs is its own change, a string on the side it belongs to, and a SAN list is never changed.",
+          "if": { "properties": { "field": { "enum": ["san.dns", "san.ip", "san.email", "san.uri"] } }, "required": ["field"] },
+          "then": {
+            "properties": {
+              "direction": { "enum": ["added", "removed"] },
+              "before": { "type": "string" },
+              "after": { "type": "string" }
+            }
+          }
+        },
+        {
+          "description": "eku is a set too, compared as the SAN lists are: one change for each usage that differs, a string. A list that loses all its usages is one removed for each usage, never null.",
+          "if": {
+            "properties": { "field": { "const": "eku" }, "direction": { "enum": ["added", "removed"] } },
+            "required": ["field", "direction"]
+          },
+          "then": {
+            "properties": {
+              "before": { "type": "string", "minLength": 1 },
+              "after": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        {
+          "description": "The extension going from a list to null (absent, which allows any purpose) or from null to a list ([] included, which allows nothing) is one changed change that carries the whole value of each side, because a change that named only the elements that differ could not say null. A list to a list is never changed.",
+          "if": {
+            "properties": { "field": { "const": "eku" }, "direction": { "const": "changed" } },
+            "required": ["field", "direction"]
+          },
+          "then": {
+            "anyOf": [
+              { "properties": { "before": { "type": "null" }, "after": { "$ref": "#/$defs/usages" } } },
+              { "properties": { "before": { "$ref": "#/$defs/usages" }, "after": { "type": "null" } } }
+            ]
+          }
+        },
+        {
+          "description": "The chain is the certificates of an observation other than its target, in the order of certificates[], told apart by their sha256. A link is { position, sha256 }, the position counted from 0 among those certificates in its own observation. removed: a link whose sha256 after does not send, with its position in before. added: a link whose sha256 only after sends, with its position in after. A link replaced by another at the same position is a removed and an added with that position. A link that stays but moves because another was added or dropped before it is no change.",
+          "if": {
+            "properties": { "field": { "const": "chain" }, "direction": { "enum": ["added", "removed"] } },
+            "required": ["field", "direction"]
+          },
+          "then": {
+            "properties": {
+              "before": { "$ref": "#/$defs/link" },
+              "after": { "$ref": "#/$defs/link" }
+            }
+          }
+        },
+        {
+          "description": "The links that both sides send are in another relative order. before and after hold their sha256, only those, each in the order of its own side; a link that was added or removed is in neither.",
+          "if": {
+            "properties": { "field": { "const": "chain" }, "direction": { "const": "changed" } },
+            "required": ["field", "direction"]
+          },
+          "then": {
+            "properties": {
+              "before": { "$ref": "#/$defs/order" },
+              "after": { "$ref": "#/$defs/order" }
+            }
+          }
+        }
+      ]
+    },
+    "usages": {
+      "description": "The list of an Extended Key Usage extension, as the observation writes it.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "link": {
+      "description": "A certificate sent after the target: where it is among those certificates, in its own observation, and which certificate it is.",
+      "type": "object",
+      "required": ["position", "sha256"],
+      "properties": {
+        "position": {
+          "description": "Position among the certificates other than the target, in the order of certificates[], counted from 0. Not the index of the observation, which counts the target too.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": { "$ref": "observation.schema.json#/$defs/sha256" }
+      }
+    },
+    "order": {
+      "description": "The sha256 of links, each once, in an order. At least two: one link has no order.",
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": { "$ref": "observation.schema.json#/$defs/sha256" }
+    }
+  }
+}

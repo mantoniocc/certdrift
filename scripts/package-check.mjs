@@ -290,6 +290,28 @@ test("the installed library checks a policy and serializes a check result as the
     assert.equal(installed.text, readFileSync(new URL("schema/examples/check-result/fail-and-warn.json", root), "utf8"));
 });
 
+test("the installed library serializes each delta example as the working copy does, byte for byte", async () => {
+    const directory = join(repository, "schema", "examples", "delta");
+    const names = readdirSync(directory).filter((name) => name.endsWith(".json")).sort();
+    assert.ok(names.length >= 20, names.join(", "));
+    const result = await runInConsumer("delta.mjs", `
+        import { readFileSync } from "node:fs";
+        import { serializeDelta } from "certdrift";
+        const texts = process.argv.slice(2).map((path) => serializeDelta(JSON.parse(readFileSync(path, "utf8"))));
+        let wrong;
+        try {
+            serializeDelta(null);
+        } catch (error) {
+            wrong = [error.name, error.message];
+        }
+        console.log(JSON.stringify({ texts, wrong }));
+    `, names.map((name) => join(directory, name)));
+    assert.equal(result.code, 0, shown(result));
+    const installed = JSON.parse(result.stdout);
+    assert.deepEqual(installed.texts, names.map((name) => readFileSync(join(directory, name), "utf8")));
+    assert.deepEqual(installed.wrong, ["TypeError", "the delta must be an object"]);
+});
+
 test("the installed library evaluates a policy against an observation and gives what the working copy gives, throws PolicyError for a policy that is not valid, and maps a code to its entry", async () => {
     const examples = "schema/examples";
     const result = await runInConsumer("evaluate.mjs", `
@@ -970,6 +992,76 @@ test("a consumer that emits declarations names what it infers from policyProblem
     assert.doesNotMatch(declarations, /certdrift\/types|certdrift\/src/, "the declarations point into the package's files");
 });
 
+test("Delta and Change import as types from the installed package and fit serializeDelta", async () => {
+    const result = await typeCheckInConsumer({
+        "delta.ts": `
+        import type { Change, Delta, Observation, Source } from "certdrift";
+        import { serializeDelta } from "certdrift";
+        ${TYPE_HELPERS}
+
+        export type Checks = [
+            Expect<Equal<Parameters<typeof serializeDelta>[0], Delta>>,
+            Expect<Equal<ReturnType<typeof serializeDelta>, string>>,
+            Expect<Equal<Delta["changes"][number], Change>>,
+            Expect<Equal<Delta["before"]["source"], Source>>,
+            Expect<Equal<Delta["after"], Delta["before"]>>,
+            Expect<Equal<Delta["before"]["source"], Observation["observation"]["source"]>>,
+            // The direction is closed on purpose, and the field is open.
+            Expect<Equal<Change["direction"], "added" | "removed" | "changed">>,
+            Expect<Equal<Change["field"], string>>,
+            Expect<Equal<Delta["identical"], boolean>>,
+            // None of them is \`any\`, which would be equal to a type that is \`any\` too.
+            Expect<Equal<Equal<Delta, any>, false>>,
+            Expect<Equal<Equal<Change, any>, false>>,
+        ];
+
+        const added: Change = { field: "san.dns", direction: "added", after: "new.example.com" };
+        const removed: Change = { field: "san.dns", direction: "removed", before: "old.example.com" };
+        const widened: Change = { field: "eku", direction: "changed", before: ["serverAuth"], after: null };
+        const link: Change = { field: "chain", direction: "added", after: { position: 0, sha256: "0".repeat(64) } };
+        export const made: Delta = {
+            contract: 1,
+            identical: false,
+            before: { at: "2026-09-15T14:02:11Z", source: { kind: "file", ref: "old.pem" } },
+            after: { at: "2026-10-20T08:00:00Z", source: { kind: "host", ref: "example.test:443", servername: null } },
+            changes: [removed, added, widened, link],
+        };
+        export const text: string = serializeDelta(made);
+
+        // Each of these fails as an unused directive if its type collapses to \`any\`.
+        // @ts-expect-error: the contract number is 1
+        export const notDelta: Delta = { ...made, contract: 2 };
+        // @ts-expect-error: a direction is one of three words
+        export const notChange: Change = { field: "serial", direction: "moved" };
+        // @ts-expect-error: a change has a field
+        export const noField: Change = { direction: "added" };
+        // @ts-expect-error: identical is a boolean
+        export const notIdentical: Delta = { ...made, identical: "true" };
+        // @ts-expect-error: a delta is not an observation
+        export const notSerializable: string = serializeDelta(({} as Observation));
+    `,
+    });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+});
+
+test("a consumer that emits declarations names what it infers from serializeDelta and a Delta through certdrift", async () => {
+    const result = await typeCheckInConsumer({
+        "emit.ts": `
+        import { serializeDelta } from "certdrift";
+        import type { Delta } from "certdrift";
+        export const write = (made: Delta) => ({ text: serializeDelta(made), changes: made.changes, first: made.changes[0], before: made.before, source: made.after.source });
+    `,
+    }, { noEmit: false, declaration: true, emitDeclarationOnly: true, outDir: "out" });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+
+    const declarations = readFileSync(join(result.directory, "out", "emit.d.ts"), "utf8");
+    // Delta itself is annotated by the consumer, so it is imported by name; what is inferred from it is not.
+    for (const name of ["Change", "Source"]) {
+        assert.match(declarations, new RegExp(`import\\("certdrift"\\)\\.${name}\\b`), `${name} is not named through certdrift`);
+    }
+    assert.doesNotMatch(declarations, /certdrift\/types|certdrift\/src/, "the declarations point into the package's files");
+});
+
 // ---------------------------------------------------------------------------------------------
 // The types of the TLS entry point
 
@@ -1071,6 +1163,7 @@ test("each exported type has the schema's property names and required ones, and 
     const schema = JSON.parse(readFileSync(join(setup.installed, "schema", "observation.schema.json"), "utf8"));
     const policy = JSON.parse(readFileSync(join(setup.installed, "schema", "policy.schema.json"), "utf8"));
     const checkResult = JSON.parse(readFileSync(join(setup.installed, "schema", "check-result.schema.json"), "utf8"));
+    const delta = JSON.parse(readFileSync(join(setup.installed, "schema", "delta.schema.json"), "utf8"));
     /** @type {[string, { properties: Record<string, unknown>, required: string[] }][]} */
     const table = [
         ["Observation", schema],
@@ -1086,6 +1179,10 @@ test("each exported type has the schema's property names and required ones, and 
         ["CheckResult", checkResult],
         ["Result", checkResult.$defs.result],
         ['CheckResult["summary"]', checkResult.properties.summary],
+        ["Delta", delta],
+        ['Delta["before"]', delta.$defs.side],
+        ['Delta["after"]', delta.$defs.side],
+        ["Change", delta.$defs.change],
     ];
     /** @param {string[]} names */
     const union = (names) => (names.length === 0 ? "never" : names.map((name) => JSON.stringify(name)).join(" | "));
@@ -1096,7 +1193,7 @@ test("each exported type has the schema's property names and required ones, and 
 
     const result = await typeCheckInConsumer({
         "schema.ts": `
-        import type { Observation, CertificateObservation, Source, Warning, DistinguishedName, SubjectAltNames, Policy, CheckResult, Result } from "certdrift";
+        import type { Observation, CertificateObservation, Source, Warning, DistinguishedName, SubjectAltNames, Policy, CheckResult, Result, Delta, Change } from "certdrift";
         ${TYPE_HELPERS}
         type RequiredKeys<T> = { [K in keyof T]-?: {} extends Pick<T, K> ? never : K }[keyof T];
 
@@ -1112,7 +1209,9 @@ test("each exported type has the schema's property names and required ones, and 
         export const warningCode: Warning["code"] = anything;
         export const keyAlgorithm: CertificateObservation["key"]["algorithm"] = anything;
         export const resultCode: Result["code"] = anything;
-        export type Unused = [Observation, DistinguishedName, SubjectAltNames, Policy, CheckResult];
+        // The field of a change is open too: a field this version has never produced is assignable.
+        export const changeField: Change["field"] = anything;
+        export type Unused = [Observation, DistinguishedName, SubjectAltNames, Policy, CheckResult, Delta];
     `,
     });
     assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));

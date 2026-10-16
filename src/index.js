@@ -1,5 +1,5 @@
 export { inspect } from "./inspect.js";
-export { serializeObservation, serializeCheckResult } from "./serialize.js";
+export { serializeObservation, serializeCheckResult, serializeDelta } from "./serialize.js";
 export { outsideValidity } from "./derived.js";
 export { policyProblems, entryOfCode } from "./policy.js";
 export { evaluate } from "./evaluate.js";
@@ -16,8 +16,9 @@ export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 // `SubjectAltNames` are there because `subject`, `issuer` and `san` cannot be named without
 // them, `PolicyProblem` because `policyProblems()` returns a list of them, and `Rule` and
 // `EvaluateOptions` because a rule of the caller's own and the options of `evaluate()` have to be
-// written down by whoever passes them, and `PrivateKey` and `MatchesPrivateKeyOptions` because a key
-// and the options of `matchesPrivateKey()` are built by the caller. The shapes of
+// written down by whoever passes them, `PrivateKey` and `MatchesPrivateKeyOptions` because a key
+// and the options of `matchesPrivateKey()` are built by the caller, and `Delta` and `Change`
+// because `serializeDelta()` takes a delta that a consumer builds and reads. The shapes of
 // `key`, `derived` and `observation` are written inline by the compiler.
 // Adding a type here is additive for the people who use the package; removing or renaming one
 // is not.
@@ -168,4 +169,31 @@ export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 /**
  * @typedef {object} MatchesPrivateKeyOptions
  * @property {"fail" | "warn"} [severity] `fail` unless it says `warn`; anything else is a `TypeError`.
+ */
+
+/**
+ * One difference between the two sides of a delta, as described by `schema/delta.schema.json`.
+ * `added` has only `after`, `removed` has only `before` and `changed` has both, and `null` is a
+ * value. What the sides hold depends on the field (a string for the element of a set, a link of
+ * the chain, the value of the observation), which is why they are `unknown`. `field` is open: it
+ * names a field of the target certificate, or `chain`. `direction` is closed on purpose, because a
+ * consumer that does not know one cannot tell which side holds the value.
+ * @typedef {object} Change
+ * @property {string} field
+ * @property {"added" | "removed" | "changed"} direction
+ * @property {unknown} [before]
+ * @property {unknown} [after]
+ */
+
+/**
+ * What changed between two observations, as described by `schema/delta.schema.json`. `before` is
+ * the observation that was given first and `after` the one given second, for the whole document;
+ * neither says which is older. `identical` is about the two targets only. A delta describes: it
+ * has no class, no reason code and no status.
+ * @typedef {object} Delta
+ * @property {1} contract
+ * @property {boolean} identical
+ * @property {{ at: string, source: Source }} before
+ * @property {{ at: string, source: Source }} after
+ * @property {Change[]} changes
  */

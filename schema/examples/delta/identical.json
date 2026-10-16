@@ -1,0 +1,20 @@
+{
+  "contract": 1,
+  "identical": true,
+  "before": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "host",
+      "ref": "api.example.com:443",
+      "servername": "api.example.com"
+    }
+  },
+  "after": {
+    "at": "2026-09-15T14:03:02Z",
+    "source": {
+      "kind": "file",
+      "ref": "api.example.com.pem"
+    }
+  },
+  "changes": []
+}

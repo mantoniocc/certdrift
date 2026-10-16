@@ -1,0 +1,40 @@
+{
+  "contract": 1,
+  "identical": true,
+  "before": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "file",
+      "ref": "fullchain.pem"
+    }
+  },
+  "after": {
+    "at": "2026-09-15T14:02:40Z",
+    "source": {
+      "kind": "file",
+      "ref": "shuffled-chain.pem"
+    }
+  },
+  "changes": [
+    {
+      "field": "chain",
+      "direction": "removed",
+      "before": {
+        "position": 1,
+        "sha256": "53bca08dd4a80434eceaccaaea5dd9af3d5d5da11b1fcf646d3cd7f8f774d7b3"
+      }
+    },
+    {
+      "field": "chain",
+      "direction": "changed",
+      "before": [
+        "eae8efb355159e69315d5991dbbe5f266ce41dcea9be52c592ed74261fa1242a",
+        "3d48201a582773a82a3d50c40f9ac75c25e8b43ce2b05f9fae455f2ad346725b"
+      ],
+      "after": [
+        "3d48201a582773a82a3d50c40f9ac75c25e8b43ce2b05f9fae455f2ad346725b",
+        "eae8efb355159e69315d5991dbbe5f266ce41dcea9be52c592ed74261fa1242a"
+      ]
+    }
+  ]
+}
