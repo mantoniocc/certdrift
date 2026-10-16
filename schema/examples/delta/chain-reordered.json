@@ -1,0 +1,33 @@
+{
+  "contract": 1,
+  "identical": true,
+  "before": {
+    "at": "2026-10-20T08:00:00Z",
+    "source": {
+      "kind": "host",
+      "ref": "api.example.com:443",
+      "servername": "api.example.com"
+    }
+  },
+  "after": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "stdin",
+      "ref": "-"
+    }
+  },
+  "changes": [
+    {
+      "field": "chain",
+      "direction": "changed",
+      "before": [
+        "eae8efb355159e69315d5991dbbe5f266ce41dcea9be52c592ed74261fa1242a",
+        "3d48201a582773a82a3d50c40f9ac75c25e8b43ce2b05f9fae455f2ad346725b"
+      ],
+      "after": [
+        "3d48201a582773a82a3d50c40f9ac75c25e8b43ce2b05f9fae455f2ad346725b",
+        "eae8efb355159e69315d5991dbbe5f266ce41dcea9be52c592ed74261fa1242a"
+      ]
+    }
+  ]
+}

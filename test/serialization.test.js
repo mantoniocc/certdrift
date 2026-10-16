@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { X509Certificate } from "node:crypto";
-import { inspect, serializeObservation, serializeCheckResult, AmbiguousTargetError } from "../src/index.js";
+import { inspect, serializeObservation, serializeCheckResult, serializeDelta, AmbiguousTargetError } from "../src/index.js";
 import { validatorFor } from "./helpers/schema.js";
 
 const fixturesUrl = new URL("fixtures/", import.meta.url);
@@ -384,4 +384,165 @@ test("the check result of the same checks serializes to the same bytes on every 
     const first = CHECK_EXAMPLES.map((name) => serializeCheckResult(JSON.parse(checkExample(name))));
     const second = CHECK_EXAMPLES.map((name) => serializeCheckResult(/** @type {any} */ (reversed(JSON.parse(checkExample(name))))));
     assert.deepEqual(second, first);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Deltas
+
+const deltaExamplesUrl = new URL("../schema/examples/delta/", import.meta.url);
+const DELTA_EXAMPLES = readdirSync(deltaExamplesUrl).filter((name) => name.endsWith(".json")).sort();
+
+/** @param {string} name File name in schema/examples/delta/. */
+const deltaExample = (name) => readFileSync(new URL(name, deltaExamplesUrl), "utf8");
+
+const DELTA_TOP_LEVEL = ["contract", "identical", "before", "after", "changes"];
+
+test("serializing each delta example reproduces its bytes", () => {
+    assert.ok(DELTA_EXAMPLES.length >= 20, DELTA_EXAMPLES.join(", "));
+    for (const name of DELTA_EXAMPLES) {
+        assert.equal(serializeDelta(JSON.parse(deltaExample(name))), deltaExample(name), name);
+    }
+});
+
+test("one Delta built in two ways, with its objects in opposite orders, gives the same bytes", () => {
+    for (const name of DELTA_EXAMPLES) {
+        const forward = JSON.parse(deltaExample(name));
+        const backward = reversed(forward);
+        assert.notDeepEqual(Object.keys(/** @type {object} */ (backward)), Object.keys(forward), `${name} was not reordered`);
+        assert.equal(serializeDelta(/** @type {any} */ (backward)), serializeDelta(forward), name);
+        assert.equal(serializeDelta(/** @type {any} */ (backward)), deltaExample(name), name);
+    }
+    // Also built from pieces, the way a comparison would assemble it.
+    const made = {};
+    const parts = JSON.parse(deltaExample("chain-replaced.json"));
+    for (const key of [...DELTA_TOP_LEVEL].reverse()) /** @type {any} */ (made)[key] = parts[key];
+    assert.equal(serializeDelta(/** @type {any} */ (made)), deltaExample("chain-replaced.json"));
+});
+
+test("a Delta is written in the order of the contract, and its before and after use the observation's own table for at and source", () => {
+    for (const name of DELTA_EXAMPLES) {
+        const written = JSON.parse(serializeDelta(/** @type {any} */ (reversed(JSON.parse(deltaExample(name))))));
+        assert.deepEqual(Object.keys(written), DELTA_TOP_LEVEL, name);
+        for (const side of [written.before, written.after]) {
+            assert.deepEqual(Object.keys(side), ["at", "source"], name);
+            assert.deepEqual(Object.keys(side.source), ["kind", "ref", "servername", "provider"].filter((key) => key in side.source), name);
+        }
+        for (const change of written.changes) {
+            assert.deepEqual(Object.keys(change), ["field", "direction", "before", "after"].filter((key) => key in change), name);
+            for (const link of [change.before, change.after].filter((value) => typeof value === "object" && value !== null && !Array.isArray(value))) {
+                assert.deepEqual(Object.keys(link), ["position", "sha256"], name);
+            }
+        }
+    }
+
+    // The same table as the observation's: a source with every key, in any order, comes out as the observation writes it.
+    const made = JSON.parse(deltaExample("identical.json"));
+    made.before.source = { servername: "s", provider: "p", ref: "r", kind: "host", zeta: 1, alpha: 2 };
+    const written = JSON.parse(serializeDelta(made));
+    assert.deepEqual(Object.keys(written.before.source), ["kind", "ref", "servername", "provider", "alpha", "zeta"]);
+    const observed = JSON.parse(serializeObservation(Object.assign(observation(), { observation: { source: made.before.source, at: made.before.at } })));
+    assert.deepEqual(Object.keys(observed.observation.source), Object.keys(written.before.source));
+    assert.deepEqual(Object.keys(observed.observation), Object.keys(written.before));
+});
+
+test("keys the contract does not name are kept after the named ones in a Delta, sorted, at every depth", () => {
+    const made = JSON.parse(deltaExample("chain-replaced.json"));
+    const written = JSON.parse(serializeDelta({
+        zeta: 1,
+        ...made,
+        before: { zz: 1, ...made.before, aa: 2 },
+        changes: made.changes.map((/** @type {any} */ change) => ({ extra: { b: 1, a: 2 }, ...change })),
+        alpha: 2,
+    }));
+    assert.deepEqual(Object.keys(written), [...DELTA_TOP_LEVEL, "alpha", "zeta"]);
+    assert.deepEqual(Object.keys(written.before), ["at", "source", "aa", "zz"]);
+    assert.deepEqual(Object.keys(written.changes[0]), ["field", "direction", "before", "after", "extra"]);
+    assert.deepEqual(Object.keys(written.changes[0].extra), ["a", "b"]);
+
+    const link = written.changes.find((/** @type {any} */ change) => change.field === "chain" && change.direction === "added");
+    const withNote = JSON.parse(serializeDelta({ ...made, changes: [{ ...link, after: { note: 1, sha256: link.after.sha256, position: link.after.position } }] }));
+    assert.deepEqual(Object.keys(withNote.changes[0].after), ["position", "sha256", "note"]);
+});
+
+test("the values of a change keep their own keys, in a fixed order, and arrays keep their order", () => {
+    const made = JSON.parse(deltaExample("san-added.json"));
+    made.changes.push({ field: "future.field", direction: "changed", before: { z: [3, 1, 2], a: { y: 1, x: 2 } }, after: [{ d: 1, c: 2 }, "b", "a"] });
+    const written = JSON.parse(serializeDelta(made)).changes.at(-1);
+    assert.deepEqual(Object.keys(written.before), ["a", "z"]);
+    assert.deepEqual(Object.keys(written.before.a), ["x", "y"]);
+    assert.deepEqual(written.before.z, [3, 1, 2]);
+    assert.deepEqual(Object.keys(written.after[0]), ["c", "d"]);
+    assert.deepEqual(written.after.slice(1), ["b", "a"]);
+
+    // An Extended Key Usage keeps the order of its list, and an order of the chain keeps its own.
+    const eku = JSON.parse(serializeDelta({ ...made, changes: [{ field: "eku", direction: "changed", before: ["serverAuth", "clientAuth"], after: null }] }));
+    assert.deepEqual(eku.changes[0].before, ["serverAuth", "clientAuth"]);
+    assert.equal(eku.changes[0].after, null);
+});
+
+test("a side that is undefined is written as absent, and null is written as a value", () => {
+    const text = serializeDelta(/** @type {any} */ ({
+        ...JSON.parse(deltaExample("identical.json")),
+        changes: [
+            { field: "san.dns", direction: "added", before: undefined, after: "a.example" },
+            { field: "san.dns", direction: "removed", before: "b.example", after: undefined },
+            { field: "key.size", direction: "changed", before: null, after: 2048 },
+        ],
+    }));
+    const { changes } = JSON.parse(text);
+    assert.deepEqual(changes, [
+        { field: "san.dns", direction: "added", after: "a.example" },
+        { field: "san.dns", direction: "removed", before: "b.example" },
+        { field: "key.size", direction: "changed", before: null, after: 2048 },
+    ]);
+    assert.ok(!("before" in changes[0]) && !("after" in changes[1]));
+    assert.deepEqual(Object.keys(changes[2]), ["field", "direction", "before", "after"]);
+});
+
+test("a Delta ends in one newline and indents with two spaces", () => {
+    for (const name of DELTA_EXAMPLES) {
+        const text = serializeDelta(JSON.parse(deltaExample(name)));
+        assert.ok(text.endsWith("}\n") && !text.endsWith("\n\n"), name);
+        assert.ok(!text.includes("\t"), name);
+        assert.equal(text, `${JSON.stringify(JSON.parse(text), null, 2)}\n`, name);
+    }
+});
+
+test("a Delta that contains itself throws a TypeError that says so, and anything but an object does too", () => {
+    const made = JSON.parse(deltaExample("san-added.json"));
+    made.changes[0].after = made;
+    assert.throws(() => serializeDelta(made), { name: "TypeError", message: "the delta contains itself" });
+
+    for (const value of [undefined, null, "{}", 1, [], true]) {
+        assert.throws(() => serializeDelta(/** @type {any} */ (value)), { name: "TypeError", message: "the delta must be an object" }, String(value));
+    }
+    // The other serializers keep their own words.
+    assert.throws(() => serializeCheckResult(/** @type {any} */ (null)), { name: "TypeError", message: "the check result must be an object" });
+    assert.throws(() => serializeObservation(/** @type {any} */ (null)), { name: "TypeError", message: "the observation must be an object" });
+});
+
+test("a Delta repeating the same value is not one that contains itself, and an own __proto__ key and a key that looks like an index survive", () => {
+    const made = JSON.parse(deltaExample("san-added.json"));
+    const shared = { z: 1 };
+    made.changes.push({ field: "future.a", direction: "added", after: shared }, { field: "future.b", direction: "added", after: shared });
+    assert.deepEqual(JSON.parse(serializeDelta(made)).changes.at(-1).after, { z: 1 });
+
+    const proto = JSON.parse('{"field":"future.p","direction":"added","after":{"__proto__":"own","2":"b","1":"a"}}');
+    const text = serializeDelta({ ...made, changes: [proto] });
+    const after = JSON.parse(text).changes[0].after;
+    assert.ok(Object.hasOwn(after, "__proto__"));
+    assert.equal(after.__proto__, "own");
+    assert.equal(serializeDelta({ ...made, changes: [JSON.parse('{"after":{"1":"a","__proto__":"own","2":"b"},"direction":"added","field":"future.p"}')] }), text);
+});
+
+test("a toJSON result is used before arranging a Delta, as in the other documents", () => {
+    const made = JSON.parse(deltaExample("san-added.json"));
+    made.before.at = new Date("2026-09-15T14:02:11Z");
+    assert.equal(JSON.parse(serializeDelta(made)).before.at, "2026-09-15T14:02:11.000Z");
+});
+
+test("the Delta serializer does not change what the other two write", () => {
+    const check = checkExample("pass.json");
+    assert.equal(serializeCheckResult(JSON.parse(check)), check);
+    assert.equal(serializeObservation(JSON.parse(example("file-single.json"))), example("file-single.json"));
 });

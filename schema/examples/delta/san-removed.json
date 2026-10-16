@@ -1,0 +1,49 @@
+{
+  "contract": 1,
+  "identical": false,
+  "before": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "file",
+      "ref": "deployed.pem"
+    }
+  },
+  "after": {
+    "at": "2026-09-15T14:05:40Z",
+    "source": {
+      "kind": "file",
+      "ref": "renewed.pem"
+    }
+  },
+  "changes": [
+    {
+      "field": "serial",
+      "direction": "changed",
+      "before": "5C1E8A3F0B7D4E92A6C8F1D2E3B4A590",
+      "after": "2B7F90A1C4D3E6581A9B0C7D8E4F3A21"
+    },
+    {
+      "field": "notBefore",
+      "direction": "changed",
+      "before": "2026-07-01T00:00:00Z",
+      "after": "2026-09-15T00:00:00Z"
+    },
+    {
+      "field": "notAfter",
+      "direction": "changed",
+      "before": "2026-09-29T00:00:00Z",
+      "after": "2026-12-14T00:00:00Z"
+    },
+    {
+      "field": "san.dns",
+      "direction": "removed",
+      "before": "legacy.example.com"
+    },
+    {
+      "field": "sha256",
+      "direction": "changed",
+      "before": "0c9196e013f0d0d1273c1f31c6a7f37beb476b511207f0f15825b9f58ae611e6",
+      "after": "4d7cfeff07ce8782c678b1ed99f3928969b56f2a4927570e3b078f4109fedc42"
+    }
+  ]
+}
