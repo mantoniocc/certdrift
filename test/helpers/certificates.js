@@ -76,3 +76,57 @@ export const UNDECODABLE_EKU_EXTENSION = [
     "-----END CERTIFICATE-----",
     "",
 ].join("\n");
+
+// CN twoeku. Two Extended Key Usage extensions, serverAuth and clientAuth, which is not valid
+// X.509. Made like EMPTY_EKU_EXTENSION, with a one-year validity (`notAfter =
+// GENERALIZEDTIME:20270101000000Z`) and these extensions
+//     [extensions]
+//     first = SEQUENCE:first
+//     second = SEQUENCE:second
+//     [first]
+//     id = OID:extendedKeyUsage
+//     value = OCTWRAP,SEQUENCE:serverAuth
+//     [serverAuth]
+//     usage = OID:serverAuth
+//     [second]
+//     id = OID:extendedKeyUsage
+//     value = OCTWRAP,SEQUENCE:clientAuth
+//     [clientAuth]
+//     usage = OID:clientAuth
+// Node.js gives `undefined` for it, the same as for an absent extension.
+export const REPEATED_EKU_EXTENSION = [
+    "-----BEGIN CERTIFICATE-----",
+    "MIIBATCB56ADAgECAgEFMAoGCCqGSM49BAMCMBExDzANBgNVBAMMBnR3b2VrdTAi",
+    "GA8yMDI2MDEwMTAwMDAwMFoYDzIwMjcwMTAxMDAwMDAwWjARMQ8wDQYDVQQDDAZ0",
+    "d29la3UwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASNuDlTlcJz8Gn6CvlMx96w",
+    "r+/PrHw2Ppd2eWwpeBR+3maso/+vWlkyCczbIc7Xo+pwZmmZ/eV+4n/DwjTqRvFS",
+    "oywwKjATBgNVHSUEDDAKBggrBgEFBQcDATATBgNVHSUEDDAKBggrBgEFBQcDAjAK",
+    "BggqhkjOPQQDAgMJADAGAgEBAgEB",
+    "-----END CERTIFICATE-----",
+    "",
+].join("\n");
+
+// CN ekuconstr. One Extended Key Usage extension, serverAuth, whose value is a constructed OCTET
+// STRING of two primitive ones, which BER allows and DER does not. Made like EMPTY_EKU_EXTENSION
+// from the extension
+//     [first]
+//     id = OID:extendedKeyUsage
+//     value = OCTWRAP,SEQUENCE:usages
+//     [usages]
+//     usage = OID:serverAuth
+// whose DER was then edited: the value `04 0c 30 0a 06 08 2b 06 01 05 05 07 03 01` became
+// `24 10 04 06 30 0a 06 08 2b 06 04 06 01 05 05 07 03 01`, and the lengths of the five elements
+// that contain it, the extension `30 13`, the sequence of extensions `30 15`, the field `a3 17`,
+// the body `30 81 d4` and the certificate `30 81 ee`, grew by 4. There is no basicConstraints.
+// Node.js reads it, with `["1.3.6.1.5.5.7.3.1"]` for the usages, and keeps the bytes as they are.
+export const CONSTRUCTED_EKU_EXTENSION = [
+    "-----BEGIN CERTIFICATE-----",
+    "MIH2MIHcoAMCAQICAQUwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJZWt1Y29uc3Ry",
+    "MCIYDzIwMjYwMTAxMDAwMDAwWhgPMjAzNjAxMDEwMDAwMDBaMBQxEjAQBgNVBAMM",
+    "CWVrdWNvbnN0cjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABBCJnuhkxFSPoDtI",
+    "HpNrUqsr2Ef4jJ8GaGSzjJ3T1RNvUG6ZUoItrX4VnX8Olnd1+nb6iWE70/vVa8Yt",
+    "kruO/MOjGzAZMBcGA1UdJSQQBAYwCgYIKwYEBgEFBQcDATAKBggqhkjOPQQDAgMJ",
+    "ADAGAgEBAgEB",
+    "-----END CERTIFICATE-----",
+    "",
+].join("\n");

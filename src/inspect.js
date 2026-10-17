@@ -8,7 +8,7 @@ import { extendedKeyUsage } from "./usage.js";
 import { publicKeyOf } from "./key.js";
 import { derivedOf, timestampOf } from "./derived.js";
 import { validityDate } from "./dates.js";
-import { kindWarning } from "./kind-warning.js";
+import { ekuWarning, kindWarning } from "./kind-warning.js";
 
 /** @import { CertificateObservation, Observation, Source, SubjectAltNames } from "./index.js" */
 
@@ -55,6 +55,9 @@ export function inspect(material, options) {
     // `kind` is Node.js's `ca`, which is false for a CA whose extensions it cannot read; the
     // warning says for which certificates that may have happened.
     const unreliable = chain.members.flatMap(({ certificate }, index) => kindWarning(certificate.raw, certificate.ca, index) ?? []);
+    // `eku` is null for an absent Extended Key Usage and for one Node.js cannot read; the warning
+    // says for which certificates it may be the second.
+    const unreadableEku = chain.members.flatMap(({ certificate }, index) => ekuWarning(certificate.raw, certificate.keyUsage, index) ?? []);
 
     return {
         contract: 1,
@@ -62,7 +65,7 @@ export function inspect(material, options) {
         observation: { at: timestamp(at), source },
         target: chain.target,
         certificates,
-        warnings: [...chain.warnings, ...unrepresented, ...unreliable],
+        warnings: [...chain.warnings, ...unrepresented, ...unreliable, ...unreadableEku],
     };
 }
 
@@ -73,7 +76,9 @@ export function inspect(material, options) {
  * lacks `keyCertSign`: that bit is what lets a key sign certificates, and verifiers such as
  * OpenSSL do not accept such a certificate as a CA either. It is also false for a CA that
  * carries a known extension twice or one that does not decode, and `kind` keeps that value:
- * `inspect()` adds a KIND_UNRELIABLE warning for those certificates.
+ * `inspect()` adds a KIND_UNRELIABLE warning for those certificates. `eku` follows Node.js too, and
+ * is `null` for an Extended Key Usage that appears twice or does not decode: `inspect()` adds an
+ * EKU_UNRELIABLE warning for those.
  * @param {import("./material.js").CertificateRead} read
  * @param {number} index
  * @param {number[]} issuedBy

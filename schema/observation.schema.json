@@ -38,7 +38,7 @@
       "items": { "$ref": "#/$defs/certificate" }
     },
     "warnings": {
-      "description": "Facts about the material that the rest of the observation does not show. Always present; empty when there is nothing to report. Ordered by what they are about: first DUPLICATE_CERTIFICATE, in input order; then SAN_TYPE_UNREPRESENTED, by certificate index and, within one certificate, by where each type first appears; then KIND_UNRELIABLE, by certificate index.",
+      "description": "Facts about the material that the rest of the observation does not show. Always present; empty when there is nothing to report. Ordered by what they are about: first DUPLICATE_CERTIFICATE, in input order; then SAN_TYPE_UNREPRESENTED, by certificate index and, within one certificate, by where each type first appears; then KIND_UNRELIABLE, by certificate index; then EKU_UNRELIABLE, by certificate index.",
       "type": "array",
       "items": { "$ref": "#/$defs/warning" }
     }
@@ -227,7 +227,7 @@
       "required": ["code", "certificate", "message"],
       "properties": {
         "code": {
-          "description": "Stable code for programs. Known values: DUPLICATE_CERTIFICATE, SAN_TYPE_UNREPRESENTED, KIND_UNRELIABLE. KIND_UNRELIABLE, at most one per certificate: kind cannot be trusted for it, because basicConstraints or Key Usage appears more than once or does not decode, because the certificate's extensions could not be read to check them, or because reading those two by the rule of kind gives another answer than Node.js does, which is how a CA that carries another known extension twice, or one that does not decode, shows. kind keeps the value Node.js gives. The message says which of these it is and never quotes a value from the certificate. Tolerate unknown values.",
+          "description": "Stable code for programs. Known values: DUPLICATE_CERTIFICATE, SAN_TYPE_UNREPRESENTED, KIND_UNRELIABLE, EKU_UNRELIABLE. KIND_UNRELIABLE, at most one per certificate: kind cannot be trusted for it, because basicConstraints or Key Usage appears more than once or does not decode, because the certificate's extensions could not be read to check them, or because reading those two by the rule of kind gives another answer than Node.js does, which is how a CA that carries another known extension twice, or one that does not decode, shows. kind keeps the value Node.js gives. EKU_UNRELIABLE, at most one per certificate: eku cannot be trusted for it, because the certificate carries an Extended Key Usage extension and eku is null all the same, which is how an extension that appears more than once, or one whose value does not decode, shows; null then does not mean that the certificate restricts no usage. eku keeps the value Node.js gives. A certificate whose extensions could not be read to check them gets KIND_UNRELIABLE and no EKU_UNRELIABLE, and a certificate can have both. The message says which of these it is and never quotes a value from the certificate. Tolerate unknown values.",
           "type": "string",
           "pattern": "^[A-Z][A-Z0-9_]*$"
         },

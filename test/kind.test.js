@@ -4,7 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { X509Certificate } from "node:crypto";
 import { inspect } from "../src/index.js";
 import * as kindWarningModule from "../src/kind-warning.js";
-import { kindWarning } from "../src/kind-warning.js";
+import { ekuWarning, kindWarning } from "../src/kind-warning.js";
 import { certificatesIn } from "../src/material.js";
 import { validatorFor } from "./helpers/schema.js";
 
@@ -809,8 +809,9 @@ test("a version 1 certificate that carries basicConstraints CA:TRUE is ca, whate
 // What `kind` says is Node.js's `ca`, which is false for a CA that carries a known extension twice
 // or one that does not decode. The observation says so with a KIND_UNRELIABLE warning and `kind`
 // keeps the value Node.js gives, so these certificates still read as end-entity. What it does not
-// say is what else was lost: the fields built from the broken extension are simply missing, and
-// that is how the code behaves today, not a rule.
+// say is what else was lost: the fields built from the broken extension are simply missing (`san`
+// is empty or keeps its first name, with no warning of its own), and that is how the code behaves
+// today, not a rule. `eku` is the one that has a warning of its own, EKU_UNRELIABLE.
 test("a CA whose basicConstraints appears twice reads as end-entity, and KIND_UNRELIABLE says kind cannot be trusted", () => {
     carries(BASIC_CONSTRAINTS_TWICE, ["basicConstraintsCa", "basicConstraintsCa"]);
     assert.equal(new X509Certificate(BASIC_CONSTRAINTS_TWICE).ca, false);
@@ -900,8 +901,8 @@ test("the reader works out a CA by the rule kind states, so told the opposite of
     });
 });
 
-test("the reader of basicConstraints and Key Usage imports nothing, exports only kindWarning and is used only by inspect", () => {
-    assert.deepEqual(Object.keys(kindWarningModule), ["kindWarning"]);
+test("the reader of basicConstraints, Key Usage and Extended Key Usage imports nothing, exports only ekuWarning and kindWarning and is used only by inspect", () => {
+    assert.deepEqual(Object.keys(kindWarningModule), ["ekuWarning", "kindWarning"]);
     const source = readFileSync(new URL("../src/kind-warning.js", import.meta.url), "utf8");
     assert.doesNotMatch(source, /^\s*import\b|\bimport\s*\(|\brequire\s*\(|\bfrom\s*["']/m);
     // Reading another field with it would start a parser. The only file that may use it is the one
@@ -1045,7 +1046,7 @@ test("these do not warn: kind is right, whether it is ca or end-entity", async (
 });
 
 test("these warn, and kind keeps the value Node.js gives: end-entity for a CA that Node.js could not read", async (t) => {
-    /** @type {[string, string, (keyof typeof EXTENSIONS)[]][]} */
+    /** @type {[string, string, (keyof typeof EXTENSIONS)[], string[]?][]} */
     const cases = [
         ["basicConstraints twice", BASIC_CONSTRAINTS_TWICE, ["basicConstraintsCa", "basicConstraintsCa"]],
         ["Key Usage twice", KEY_USAGE_TWICE, ["basicConstraintsCa", "keyUsageCertSign", "keyUsageCertSign"]],
@@ -1055,18 +1056,18 @@ test("these warn, and kind keeps the value Node.js gives: end-entity for a CA th
         ["a basicConstraints with a negative path length", BASIC_CONSTRAINTS_NEGATIVE_PATH_LENGTH, ["basicConstraintsNegativePathLength"]],
         ["a CA whose subjectAltName is repeated", SAN_TWICE, ["basicConstraintsCa", "subjectAltName", "subjectAltName"]],
         ["a CA whose subjectAltName does not decode", SAN_UNDECODABLE, ["basicConstraintsCa", "subjectAltNameUndecodable"]],
-        ["a CA whose Extended Key Usage is repeated", EKU_TWICE, ["basicConstraintsCa", "extendedKeyUsage", "extendedKeyUsage"]],
-        ["a CA whose Extended Key Usage does not decode", EKU_UNDECODABLE, ["basicConstraintsCa", "extendedKeyUsageUndecodable"]],
+        ["a CA whose Extended Key Usage is repeated, which also gets EKU_UNRELIABLE", EKU_TWICE, ["basicConstraintsCa", "extendedKeyUsage", "extendedKeyUsage"], ["EKU_UNRELIABLE"]],
+        ["a CA whose Extended Key Usage does not decode, which also gets EKU_UNRELIABLE", EKU_UNDECODABLE, ["basicConstraintsCa", "extendedKeyUsageUndecodable"], ["EKU_UNRELIABLE"]],
         ["a CA whose subjectKeyIdentifier is repeated", SKI_TWICE, ["basicConstraintsCa", "subjectKeyIdentifier", "subjectKeyIdentifier"]],
         ["a CA whose subjectKeyIdentifier does not decode", SKI_UNDECODABLE, ["basicConstraintsCa", "subjectKeyIdentifierUndecodable"]],
     ];
-    for (const [name, pem, extensions] of cases) {
+    for (const [name, pem, extensions, others = []] of cases) {
         await t.test(name, () => {
             carries(pem, extensions);
             assert.equal(new X509Certificate(pem).ca, false);
             const observation = observe(pem);
             assert.equal(observation.certificates[0].kind, "end-entity");
-            assert.deepEqual(observation.warnings.map(({ code, certificate }) => [code, certificate]), [["KIND_UNRELIABLE", 0]]);
+            assert.deepEqual(observation.warnings.map(({ code, certificate }) => [code, certificate]), [["KIND_UNRELIABLE", 0], ...others.map((code) => [code, 0])]);
         });
     }
 });
@@ -1134,6 +1135,25 @@ test("KIND_UNRELIABLE follows the duplicate and subject alternative name warning
         ["SAN_TYPE_UNREPRESENTED", 1],
         ["KIND_UNRELIABLE", 0],
         ["KIND_UNRELIABLE", 2],
+    ]);
+    assert.deepEqual(errorsOf(observation), []);
+});
+
+test("EKU_UNRELIABLE follows KIND_UNRELIABLE: every warning about kind comes first, then those about eku, each by certificate index", () => {
+    const kinds = readFileSync(new URL("leaf-san-kinds.pem", fixturesUrl), "latin1");
+    // Index 0 is a CA with an undecodable Extended Key Usage, 1 is the leaf with two names the
+    // contract does not represent, 2 repeats basicConstraints, and 3 is a CA with the Extended Key
+    // Usage twice. Indexes 0 and 3 get both warnings, and the Extended Key Usage ones are not
+    // between the others.
+    const observation = inspect(EKU_UNDECODABLE + kinds + BASIC_CONSTRAINTS_TWICE + EKU_TWICE, { at: AT, select: sha256Of(kinds).slice(0, 8) });
+    assert.deepEqual(observation.warnings.map(({ code, certificate }) => [code, certificate]), [
+        ["SAN_TYPE_UNREPRESENTED", 1],
+        ["SAN_TYPE_UNREPRESENTED", 1],
+        ["KIND_UNRELIABLE", 0],
+        ["KIND_UNRELIABLE", 2],
+        ["KIND_UNRELIABLE", 3],
+        ["EKU_UNRELIABLE", 0],
+        ["EKU_UNRELIABLE", 3],
     ]);
     assert.deepEqual(errorsOf(observation), []);
 });

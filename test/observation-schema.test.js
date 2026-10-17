@@ -29,6 +29,7 @@ test("the examples required by the contract exist", ()=> {
         "ip-san.json",
         "ed25519.json",
         "kind-unreliable.json",
+        "eku-unreliable.json",
     ];
     for (const name of required) {
         assert.ok(exampleFiles.includes(name), `missing example ${name}`)
@@ -129,7 +130,7 @@ test("kind keeps its name, type and place among the required fields, and the con
 
 test("the schema lists KIND_UNRELIABLE among the warning codes, says it comes after the others by certificate index, and an example carries it and validates", () => {
     const { description: code } = schema.$defs.warning.properties.code;
-    assert.match(code, /Known values: DUPLICATE_CERTIFICATE, SAN_TYPE_UNREPRESENTED, KIND_UNRELIABLE\./);
+    assert.match(code, /Known values: DUPLICATE_CERTIFICATE, SAN_TYPE_UNREPRESENTED, KIND_UNRELIABLE, EKU_UNRELIABLE\./);
     assert.match(code, /KIND_UNRELIABLE, at most one per certificate/);
     assert.match(code, /kind keeps the value Node\.js gives/);
     assert.match(code, /never quotes a value from the certificate/);
@@ -148,4 +149,28 @@ test("adding the KIND_UNRELIABLE warning keeps the contract at 1 and the shape o
     assert.equal(schema.properties.contract.const, 1);
     assert.deepEqual(schema.$defs.warning.required, ["code", "certificate", "message"]);
     assert.equal(schema.$defs.warning.properties.code.pattern, "^[A-Z][A-Z0-9_]*$");
+});
+
+test("the schema lists EKU_UNRELIABLE among the warning codes, says it comes after KIND_UNRELIABLE by certificate index, and an example carries it and validates", () => {
+    const { description: code } = schema.$defs.warning.properties.code;
+    assert.match(code, /EKU_UNRELIABLE, at most one per certificate: eku cannot be trusted for it/);
+    assert.match(code, /appears more than once, or one whose value does not decode/);
+    assert.match(code, /eku keeps the value Node\.js gives/);
+    assert.match(code, /gets KIND_UNRELIABLE and no EKU_UNRELIABLE, and a certificate can have both/);
+    assert.match(code, /never quotes a value from the certificate/);
+
+    const { description: order } = schema.properties.warnings;
+    assert.match(order, /then KIND_UNRELIABLE, by certificate index; then EKU_UNRELIABLE, by certificate index\./);
+
+    const example = readJson(new URL("eku-unreliable.json", examplesUrl));
+    assert.deepEqual(errorsOf(example), []);
+    assert.deepEqual(example.warnings.map((/** @type {{ code: string }} */ warning) => warning.code), ["EKU_UNRELIABLE"]);
+    assert.equal(example.certificates[example.warnings[0].certificate].eku, null);
+});
+
+test("adding the EKU_UNRELIABLE warning keeps the contract at 1, the shape of a warning and the description of eku", () => {
+    assert.equal(schema.properties.contract.const, 1);
+    assert.deepEqual(schema.$defs.warning.required, ["code", "certificate", "message"]);
+    assert.equal(schema.$defs.warning.properties.code.pattern, "^[A-Z][A-Z0-9_]*$");
+    assert.deepEqual(schema.$defs.certificate.properties.eku.type, ["array", "null"]);
 });

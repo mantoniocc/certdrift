@@ -28,7 +28,10 @@ export function usageName(usage) {
  * The extended key usages of a certificate, sorted. Node.js exposes them as `keyUsage`, a
  * misleading name: the OIDs are those of the Extended Key Usage extension, and the property is
  * `undefined` when the extension is absent, which is `null` here. An extension that is present
- * and empty is `[]`: the two differ, since an absent extension restricts nothing.
+ * and empty is `[]`: the two differ, since an absent extension restricts nothing. It is also
+ * `undefined` for an extension that is present and that Node.js cannot read, because it appears
+ * more than once or its value does not decode, and that is `null` here too: `inspect()` adds an
+ * EKU_UNRELIABLE warning to the observation for it.
  *
  * Repeated entries are kept, so the output shows what the certificate holds. Sorting is by code
  * unit, which does not depend on the machine's locale.
