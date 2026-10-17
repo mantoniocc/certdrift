@@ -61,6 +61,13 @@ export const ENTRIES = Object.freeze(/** @type {(readonly [string, ValueKind, re
     ["matchesPrivateKey", "none", ["KEY_MISMATCH", "KEY_UNREADABLE"]],
 ]));
 
+/**
+ * The names of the entries a policy may hold, in the order of `ENTRIES`. A program that reads a
+ * policy file and wants to refuse a name that is none of these asks for the list here instead of
+ * writing it again: `policyProblems` tolerates an entry it does not know, as the contract says.
+ */
+export const POLICY_ENTRIES = Object.freeze(ENTRIES.map(([name]) => name));
+
 /** @type {Map<string, string>} */
 const ENTRY_OF_CODE = new Map(ENTRIES.flatMap(([entry, , codes]) => codes.map((code) => [code, entry])));
 

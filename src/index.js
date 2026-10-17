@@ -1,7 +1,7 @@
 export { inspect } from "./inspect.js";
 export { serializeObservation, serializeCheckResult, serializeDelta } from "./serialize.js";
 export { outsideValidity } from "./derived.js";
-export { policyProblems, entryOfCode } from "./policy.js";
+export { policyProblems, entryOfCode, POLICY_ENTRIES } from "./policy.js";
 export { evaluate } from "./evaluate.js";
 export { matchesPrivateKey } from "./private-key.js";
 export { ParseError, AmbiguousTargetError, PolicyError } from "./errors.js";

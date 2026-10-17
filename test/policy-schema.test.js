@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { validatorFor } from "./helpers/schema.js";
-import { ENTRIES } from "../src/policy.js";
+import { ENTRIES, POLICY_ENTRIES } from "../src/policy.js";
+import * as library from "../src/index.js";
 
 const examplesUrl = new URL("../schema/examples/policy/", import.meta.url);
 const schemaUrl = new URL("../schema/", import.meta.url);
@@ -205,4 +206,50 @@ test("every entry that takes a value requires it, and the three that do not take
         assert.equal(required.includes("value"), kind !== "none", entry);
         assert.equal(withoutValue.includes(entry), kind === "none", entry);
     }
+});
+
+test("POLICY_ENTRIES is every entry of the schema in its order, the package exports it, and it cannot be changed", () => {
+    assert.deepEqual([...POLICY_ENTRIES], Object.keys(schema.properties).filter((name) => name !== "contract"));
+    assert.deepEqual([...POLICY_ENTRIES], ENTRIES.map(([entry]) => entry));
+    assert.equal(library.POLICY_ENTRIES, POLICY_ENTRIES);
+    assert.equal(Object.isFrozen(POLICY_ENTRIES), true);
+    assert.throws(() => /** @type {string[]} */ (/** @type {unknown} */ (POLICY_ENTRIES)).push("x"), TypeError);
+    assert.throws(() => { /** @type {string[]} */ (/** @type {unknown} */ (POLICY_ENTRIES))[0] = "x"; }, TypeError);
+    assert.equal(POLICY_ENTRIES.includes("contract"), false, "contract is not an entry");
+});
+
+test("the description of matchesPrivateKey lists the reasons a key can be unreadable in the words the README gives them", () => {
+    const { description } = schema.properties.matchesPrivateKey;
+    const reasons = [
+        "the file holds a certificate",
+        "a public key",
+        "no private key or more than one",
+        "its format or algorithm is not supported or the key is damaged",
+        "it is encrypted and no passphrase was given",
+        "the passphrase given does not decrypt it",
+    ];
+    for (const reason of reasons) says(description, new RegExp(reason.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    says(description, /with KEY_UNREADABLE when the key could not be read: the file holds a certificate, a public key, no private key or more than one, its format or algorithm is not supported or the key is damaged, it is encrypted and no passphrase was given, or the passphrase given does not decrypt it\./);
+    // The README says the same things about the same reasons, in the messages of the table and in its row of codes.
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+    for (const message of ["the file holds a certificate", "the file holds a public key", "the file holds no private key", "it is encrypted and no passphrase was given", "it could not be decrypted with the passphrase given", "the file holds more than one private key", "its format or algorithm is not supported, or the key is damaged"]) {
+        assert.ok(readme.includes(`\`${message}\``), message);
+    }
+    const row = /^\| `KEY_UNREADABLE` .*$/m.exec(readme)?.[0] ?? "";
+    assert.ok(row.includes("the file holds a certificate, a public key, no private key or more than one, its format or algorithm is not supported or the key is damaged, it is encrypted and no passphrase was given, or the passphrase given does not decrypt it"), row);
+});
+
+test("the descriptions of expectEku and ekuAllows, and the README, describe a certificate that lists anyExtendedKeyUsage", () => {
+    says(schema.properties.expectEku.description, /A certificate that lists anyExtendedKeyUsage \(the OID 2\.5\.29\.37\.0, which eku shows as that text\) still fails unless it also lists the usage/);
+    says(schema.properties.ekuAllows.description, /does not include every usage and does not list anyExtendedKeyUsage\./);
+    says(schema.properties.ekuAllows.description, /A certificate whose extension lists anyExtendedKeyUsage \(the OID 2\.5\.29\.37\.0, which eku shows as that text\) passes for any usage, because that extension forbids nothing\./);
+    assert.doesNotMatch(schema.properties.rejectEku.description, /anyExtendedKeyUsage/, "rejectEku does not change");
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8").replaceAll("`", "").replace(/\s+/g, " ");
+    for (const part of [
+        "An extension that lists anyExtendedKeyUsage (the OID 2.5.29.37.0, which eku shows as that text, since it is not one of the six names) forbids no usage, so ekuAllows passes for any usage, alone or next to others",
+        "expectEku asks for the usage to be listed, and anyExtendedKeyUsage lists none, so it still fails with EKU_MISSING unless the usage is listed too; its message says that the certificate lists anyExtendedKeyUsage",
+        "rejectEku does not change",
+        "includes 2.5.29.37.0 (anyExtendedKeyUsage)",
+        "0 before notBefore (the message says 0%)",
+    ]) assert.ok(readme.includes(part), part);
 });

@@ -1,4 +1,4 @@
-import { PolicyError, entryOfCode, policyProblems } from "../src/index.js";
+import { POLICY_ENTRIES, PolicyError, entryOfCode, policyProblems } from "../src/index.js";
 
 /** @import { PolicyProblem } from "../src/index.js" */
 
@@ -166,6 +166,28 @@ export function flagProblems(given) {
         const bad = texts.filter((text) => policyProblems({ contract: 1, [entry]: { value: [text] } }).length > 0);
         return bad.length === 0 ? [`--${row.flag}: ${problem.message}`] : bad.map((text) => `--${row.flag}: ${JSON.stringify(text)} is not a value this flag accepts`);
     });
+}
+
+/** The top-level properties of a policy file that are not entries and are accepted: `$schema` is what editors add to JSON files. */
+const NOT_ENTRIES = ["contract", "$schema"];
+
+/**
+ * What a policy file has at its top level that this version does not know. The library tolerates it,
+ * as the contract says, so that a program that passes its own policy keeps working; a file is typed
+ * by a person, and a misspelled entry (`expectSAN`) would otherwise check nothing in silence. A value
+ * that is not an object has no entries, and `policyProblems` already says what is wrong with it.
+ * Properties inside an entry are not looked at.
+ * @param {unknown} policy
+ * @returns {PolicyProblem[]}
+ */
+export function unknownEntries(policy) {
+    if (typeof policy !== "object" || policy === null || Array.isArray(policy)) return [];
+    const known = new Set([...NOT_ENTRIES, ...POLICY_ENTRIES]);
+    return Object.keys(policy)
+        .filter((name) => !known.has(name))
+        .sort()
+        // A JSON Pointer (RFC 6901), as the library writes the path of a problem.
+        .map((name) => ({ path: `/${name.replaceAll("~", "~0").replaceAll("/", "~1")}`, message: "is not an entry this version knows" }));
 }
 
 /**

@@ -2295,12 +2295,15 @@ test("a --host value that is a URL, a path, a port out of range, a zone, a trail
     assert.equal(equals.observation.source.ref, hostOf(server));
 });
 
-test("today: a URL given to --host is refused with a reason about the port, because the colon after https is read as the port's", async () => {
-    // The refusal is right and the reason is not the helpful one. It is the module's wording, and
-    // it is pinned here as it is so that a change to it is noticed, not as the message to keep.
-    const result = await run(["inspect", "--host", "https://example.com"]);
-    assert.equal(result.code, 2);
-    assert.match(result.stderr, /^certdrift: target "https:\/\/example\.com" cannot be read: the port must be a whole number from 1 to 65535\n/);
+test("a URL given to inspect --host is refused with the message that a URL is not accepted and the target is host[:port], whatever the scheme and its case, and any other refusal keeps its reason", async () => {
+    for (const url of ["https://example.com", "ftp://a", "example.com://", "HTTPS://example.com:443/x", "http://[::1]:8443"]) {
+        const result = await run(["inspect", `--host=${url}`]);
+        assert.deepEqual([url, result.code, result.stdout], [url, 2, ""]);
+        assert.ok(result.stderr.startsWith(`certdrift: target ${JSON.stringify(url)} cannot be read: a URL is not accepted: the target is host[:port]\n`), result.stderr);
+    }
+    // The reason of a target that is not a URL is the one it had.
+    const port = await run(["inspect", "--host", "example.com:99999"]);
+    assert.match(port.stderr, /^certdrift: target "example\.com:99999" cannot be read: the port must be a whole number from 1 to 65535\n/);
 });
 
 test("a certificate that has expired, or has no lifetime, is printed like any other and exits 0: the command does not judge what the server serves", async (t) => {

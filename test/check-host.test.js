@@ -473,6 +473,17 @@ test("a local server with one chain is checked against the matching fingerprint 
 // ---------------------------------------------------------------------------------------------
 // The help and the README
 
+test("a URL given to check --host is refused with the message that a URL is not accepted and the target is host[:port], before any file is read", async () => {
+    for (const url of ["https://example.com", "HTTPS://example.com:443/x", "example.com://", "http://[::1]:8443"]) {
+        const result = await runMain(["check", `--host=${url}`, "--policy", "no-such-file.json", "--expect-eku", "serverAuth"]);
+        const plain = await runMain(["check", `--host=${url}`, "--reject-eku", "codeSigning"]);
+        for (const found of [result, plain]) {
+            assert.equal(found.code, 2, url);
+            assert.ok(found.stderr.startsWith(`certdrift: target ${JSON.stringify(url)} cannot be read: a URL is not accepted: the target is host[:port]\n`), found.stderr);
+        }
+    }
+});
+
 test("the help and the README document check --host, --servername, --timeout and --expect-fingerprint-of, with an example of confirming an installation", async () => {
     const help = (await runMain(["check", "--help"])).stdout;
     for (const flag of ["--host <host[:port]>", "--servername <name>", "--timeout <ms>", "--expect-fingerprint-of <file>"]) {
@@ -483,7 +494,7 @@ test("the help and the README document check --host, --servername, --timeout and
     for (const part of [
         "Checking a server:", "chosen as certdrift inspect --host chooses it", "443 unless given", "certdrift inspect --help",
         "Every file an option names (--policy, --key, --expect-fingerprint-of) is read before the host is contacted",
-        "--select does not choose in it", "--expect-fingerprint-of does",
+        "--select does not choose in it", "no --key, no --expect-fingerprint-of and no --policy there is nothing to check",
         "does not answer in time",
     ]) assert.ok(flat.includes(part), `the help says: ${part}`);
     assert.doesNotMatch(help, /PENDING/);

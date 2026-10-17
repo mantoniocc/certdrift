@@ -52,13 +52,15 @@ export function checked(result, entry, target, now) {
         case "maxLifetimeUsed":
             return {
                 holds: nowSeconds - notBefore <= entry.value * (notAfter - notBefore),
-                actual: notAfter > notBefore ? (nowSeconds - notBefore) / (notAfter - notBefore) : null,
+                // Nothing of a lifetime that has not started is used, so the fraction is cut at 0 there; the verdict is not.
+                actual: notAfter > notBefore ? Math.max(0, (nowSeconds - notBefore) / (notAfter - notBefore)) : null,
                 expected: entry.value,
             };
         case "expectEku":
             return { holds: target.eku !== null && wanted.every(listed), actual: target.eku, expected: wanted };
         case "ekuAllows":
-            return { holds: target.eku === null || wanted.every(listed), actual: target.eku, expected: wanted };
+            // anyExtendedKeyUsage forbids no usage.
+            return { holds: target.eku === null || listed("2.5.29.37.0") || wanted.every(listed), actual: target.eku, expected: wanted };
         case "rejectEku":
             return { holds: target.eku === null || !wanted.some(listed), actual: target.eku, expected: wanted };
         case "expectSan": {

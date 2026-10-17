@@ -10,6 +10,10 @@ const LABEL = /^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$/;
 // connected to as another.
 const NUMBER = /^(?:\d+|0[xX][0-9A-Fa-f]*)$/;
 const PORT = /^[1-9]\d{0,4}$/;
+// A scheme as RFC 3986 writes it, then `://`. No target can start like this: it has one colon at
+// most outside brackets, and what follows it is a number, so a text that does was never going to be
+// read, and the only question is which reason to give.
+const URL_START = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
 
 /**
  * Whether a text is a host name that can be connected to and sent as a server name: dot
@@ -46,6 +50,7 @@ function refuse(text, reason) {
  */
 export function targetOf(text) {
     if (typeof text !== "string") throw new TypeError("target must be a string");
+    if (URL_START.test(text)) refuse(text, "a URL is not accepted: the target is host[:port]");
 
     /** @type {string} */ let host;
     /** @type {string | undefined} */ let portText;

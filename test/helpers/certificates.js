@@ -1,6 +1,8 @@
 /**
  * Certificates that OpenSSL's own commands will not write, hand-built because a test needs the
- * case, made once with `openssl asn1parse -genconf <file> -noout -out <name>.der` and then
+ * case (the two that list anyExtendedKeyUsage are the exception: `openssl req` writes them, and they
+ * are hand-built so that their bytes and their dates do not change when the fixtures are
+ * regenerated), made once with `openssl asn1parse -genconf <file> -noout -out <name>.der` and then
  * `openssl x509 -inform DER -in <name>.der -outform PEM`. Their signature is not valid, which does
  * not matter for a certificate observed alone. They share this configuration, with
  * `$PUBLIC_KEY` the 65 bytes of a P-256 public point in hexadecimal and `$CN` a common name:
@@ -127,6 +129,45 @@ export const CONSTRUCTED_EKU_EXTENSION = [
     "HpNrUqsr2Ef4jJ8GaGSzjJ3T1RNvUG6ZUoItrX4VnX8Olnd1+nb6iWE70/vVa8Yt",
     "kruO/MOjGzAZMBcGA1UdJSQQBAYwCgYIKwYEBgEFBQcDATAKBggqhkjOPQQDAgMJ",
     "ADAGAgEBAgEB",
+    "-----END CERTIFICATE-----",
+    "",
+].join("\n");
+
+// CN anyonly. One Extended Key Usage extension that lists anyExtendedKeyUsage alone, which is valid
+// X.509 and which `openssl req -addext extendedKeyUsage=anyExtendedKeyUsage` also writes. Made like
+// EMPTY_EKU_EXTENSION, with the extensions
+//     [extensions]
+//     first = SEQUENCE:first
+//     [first]
+//     id = OID:extendedKeyUsage
+//     value = OCTWRAP,SEQUENCE:usages
+//     [usages]
+//     any = OID:2.5.29.37.0
+// Node.js shows `["2.5.29.37.0"]` for it, the OID as text, since it is not one of the six names.
+export const ANY_EKU_ALONE = [
+    "-----BEGIN CERTIFICATE-----",
+    "MIHqMIHQoAMCAQICAQUwCgYIKoZIzj0EAwIwEjEQMA4GA1UEAwwHYW55b25seTAi",
+    "GA8yMDI2MDEwMTAwMDAwMFoYDzIwMzYwMTAxMDAwMDAwWjASMRAwDgYDVQQDDAdh",
+    "bnlvbmx5MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEEIme6GTEVI+gO0gek2tS",
+    "qyvYR/iMnwZoZLOMndPVE29QbplSgi2tfhWdfw6Wd3X6dvqJYTvT+9Vrxi2Su478",
+    "w6MTMBEwDwYDVR0lBAgwBgYEVR0lADAKBggqhkjOPQQDAgMJADAGAgEBAgEB",
+    "-----END CERTIFICATE-----",
+    "",
+].join("\n");
+
+// CN anyserver. The same extension listing anyExtendedKeyUsage and then serverAuth, with
+//     [usages]
+//     any = OID:2.5.29.37.0
+//     server = OID:serverAuth
+// Node.js shows `["2.5.29.37.0", "1.3.6.1.5.5.7.3.1"]` for it, in the order the certificate writes them.
+export const ANY_EKU_WITH_SERVER_AUTH = [
+    "-----BEGIN CERTIFICATE-----",
+    "MIH4MIHeoAMCAQICAQUwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJYW55c2VydmVy",
+    "MCIYDzIwMjYwMTAxMDAwMDAwWhgPMjAzNjAxMDEwMDAwMDBaMBQxEjAQBgNVBAMM",
+    "CWFueXNlcnZlcjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABBCJnuhkxFSPoDtI",
+    "HpNrUqsr2Ef4jJ8GaGSzjJ3T1RNvUG6ZUoItrX4VnX8Olnd1+nb6iWE70/vVa8Yt",
+    "kruO/MOjHTAbMBkGA1UdJQQSMBAGBFUdJQAGCCsGAQUFBwMBMAoGCCqGSM49BAMC",
+    "AwkAMAYCAQECAQE=",
     "-----END CERTIFICATE-----",
     "",
 ].join("\n");
