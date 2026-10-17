@@ -1,0 +1,56 @@
+{
+  "contract": 1,
+  "format": "x509",
+  "observation": {
+    "at": "2026-09-15T14:02:11Z",
+    "source": {
+      "kind": "file",
+      "ref": "eku-undecodable.crt"
+    }
+  },
+  "target": 0,
+  "certificates": [
+    {
+      "index": 0,
+      "kind": "end-entity",
+      "selfSigned": false,
+      "issuedBy": [],
+      "subject": {
+        "cn": "undecodable",
+        "dn": "CN=undecodable"
+      },
+      "issuer": {
+        "cn": "undecodable",
+        "dn": "CN=undecodable"
+      },
+      "serial": "05",
+      "notBefore": "2026-01-01T00:00:00Z",
+      "notAfter": "2036-01-01T00:00:00Z",
+      "san": {
+        "dns": [],
+        "ip": [],
+        "email": [],
+        "uri": []
+      },
+      "eku": null,
+      "key": {
+        "algorithm": "ec",
+        "size": 256,
+        "curve": "P-256"
+      },
+      "sha256": "573f9c82a48ebe7d4a9c5a6024a2b4f41b13b817221269f4e2d3befa50a48f1b",
+      "spkiSha256": "148645518d7a125a24f56c2da3e111adcdcf854a1261821b7641684f9617cf9f",
+      "derived": {
+        "daysRemaining": 3394.4,
+        "lifetimeFraction": 0.07
+      }
+    }
+  ],
+  "warnings": [
+    {
+      "code": "EKU_UNRELIABLE",
+      "certificate": 0,
+      "message": "eku cannot be trusted: Extended Key Usage does not decode"
+    }
+  ]
+}

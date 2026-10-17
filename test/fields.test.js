@@ -10,7 +10,7 @@ import { extendedKeyUsage } from "../src/usage.js";
 import { EXTENDED_KEY_USAGE_OIDS } from "../src/index.js";
 import { publicKeyOf } from "../src/key.js";
 import { validatorFor } from "./helpers/schema.js";
-import { EMPTY_EKU_EXTENSION, UNDECODABLE_EKU_EXTENSION } from "./helpers/certificates.js";
+import { EMPTY_EKU_EXTENSION, REPEATED_EKU_EXTENSION, UNDECODABLE_EKU_EXTENSION } from "./helpers/certificates.js";
 
 // The normalized fields of one certificate: names, dates, serial, usages and key. Nothing here
 // may depend on a fixture's exact bytes, because `npm run fixtures` replaces them, so every
@@ -103,38 +103,6 @@ const BEFORE_THE_EPOCH = [
     "ZHllYXJzMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjbg5U5XCc/Bp+gr5TMfe",
     "sK/vz6x8Nj6XdnlsKXgUft5mrKP/r1pZMgnM2yHO16PqcGZpmf3lfuJ/w8I06kbx",
     "UjAKBggqhkjOPQQDAgMJADAGAgEBAgEB",
-    "-----END CERTIFICATE-----",
-    "",
-].join("\n");
-
-// CN twoeku. Two Extended Key Usage extensions, serverAuth and clientAuth, which is not valid
-// X.509. Added to [tbs]:
-//     exts = EXPLICIT:3,SEQUENCE:extensions
-//     [validity]
-//     notBefore = GENERALIZEDTIME:20260101000000Z
-//     notAfter = GENERALIZEDTIME:20270101000000Z
-//     [extensions]
-//     first = SEQUENCE:first
-//     second = SEQUENCE:second
-//     [first]
-//     id = OID:extendedKeyUsage
-//     value = OCTWRAP,SEQUENCE:serverAuth
-//     [serverAuth]
-//     usage = OID:serverAuth
-//     [second]
-//     id = OID:extendedKeyUsage
-//     value = OCTWRAP,SEQUENCE:clientAuth
-//     [clientAuth]
-//     usage = OID:clientAuth
-// Node.js shows no usages at all, the same as for a certificate without the extension.
-const TWO_EKU_EXTENSIONS = [
-    "-----BEGIN CERTIFICATE-----",
-    "MIIBATCB56ADAgECAgEFMAoGCCqGSM49BAMCMBExDzANBgNVBAMMBnR3b2VrdTAi",
-    "GA8yMDI2MDEwMTAwMDAwMFoYDzIwMjcwMTAxMDAwMDAwWjARMQ8wDQYDVQQDDAZ0",
-    "d29la3UwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASNuDlTlcJz8Gn6CvlMx96w",
-    "r+/PrHw2Ppd2eWwpeBR+3maso/+vWlkyCczbIc7Xo+pwZmmZ/eV+4n/DwjTqRvFS",
-    "oywwKjATBgNVHSUEDDAKBggrBgEFBQcDATATBgNVHSUEDDAKBggrBgEFBQcDAjAK",
-    "BggqhkjOPQQDAgMJADAGAgEBAgEB",
     "-----END CERTIFICATE-----",
     "",
 ].join("\n");
@@ -496,10 +464,11 @@ test("eku maps known OIDs to names, leaves the OID as text otherwise, is sorted,
 
     // Node.js shows no usages when the certificate carries the extension twice, and gives
     // `undefined` for an extension it cannot decode, so both read as "no restriction". The
-    // restriction cannot be seen without reading the DER, which is not done here.
+    // restriction is not read from the DER for `eku`: `inspect()` only warns that `eku` cannot be
+    // trusted for those certificates.
     await t.test("a certificate with two Extended Key Usage extensions is shown with none, as Node.js shows it", () => {
-        const certificate = inspect(TWO_EKU_EXTENSIONS, { at: AT }).certificates[0];
-        assert.equal(new X509Certificate(TWO_EKU_EXTENSIONS).keyUsage, undefined);
+        const certificate = inspect(REPEATED_EKU_EXTENSION, { at: AT }).certificates[0];
+        assert.equal(new X509Certificate(REPEATED_EKU_EXTENSION).keyUsage, undefined);
         assert.equal(certificate.eku, null);
     });
 
@@ -514,12 +483,13 @@ test("eku maps known OIDs to names, leaves the OID as text otherwise, is sorted,
     });
 
     // Today's behaviour, not the rule: an extension Node.js cannot decode reads as an absent one,
-    // with no warning, so a rule that treats an absent extension as "no restriction" passes it.
-    await t.test("today an Extended Key Usage extension that does not decode reads as null with no warning", () => {
+    // so a rule that treats an absent extension as "no restriction" passes it. The observation
+    // carries a warning that says `eku` cannot be trusted for the certificate.
+    await t.test("today an Extended Key Usage extension that does not decode reads as null, with an EKU_UNRELIABLE warning", () => {
         assert.equal(new X509Certificate(UNDECODABLE_EKU_EXTENSION).keyUsage, undefined);
         const observation = inspect(UNDECODABLE_EKU_EXTENSION, { at: AT });
         assert.equal(observation.certificates[0].eku, null);
-        assert.deepEqual(observation.warnings, []);
+        assert.deepEqual(observation.warnings.map(({ code, certificate }) => [code, certificate]), [["EKU_UNRELIABLE", 0]]);
     });
 });
 

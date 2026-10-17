@@ -552,10 +552,10 @@ test("an extension that is present and lists nothing is [] in a real certificate
 // ---------------------------------------------------------------------------------------------
 // Today's behaviour that looks wrong and is not this function's to change
 
-test("today an Extended Key Usage extension that does not decode reads as eku null with no warning, so ekuAllows and rejectEku pass it and expectEku fails it", () => {
+test("today an Extended Key Usage extension that does not decode reads as eku null, with a warning that says so, and ekuAllows and rejectEku pass it and expectEku fails it", () => {
     const observation = inspect(UNDECODABLE_EKU_EXTENSION, { at: new Date(AT) });
     assert.equal(observation.certificates[0].eku, null);
-    assert.deepEqual(observation.warnings, []);
+    assert.deepEqual(observation.warnings.map(({ code, certificate }) => [code, certificate]), [["EKU_UNRELIABLE", 0]]);
     const check = evaluate(observation, policyOf({ expectEku: { value: ["serverAuth"] }, ekuAllows: { value: ["serverAuth"] }, rejectEku: { value: ["serverAuth"] } }), { now: observation.certificates[0].notBefore });
     assert.deepEqual(statuses(check).slice(2), ["EKU_MISSING fail", "EKU_NOT_PERMITTED pass", "EKU_FORBIDDEN pass"]);
     assert.equal(resultOf(check, "ekuAllows").actual, null);

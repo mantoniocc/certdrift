@@ -1,4 +1,4 @@
-// Whether `kind` can be trusted for a certificate.
+// Whether `kind` and `eku` can be trusted for a certificate.
 //
 // `kind` is Node.js's `ca`, which comes from OpenSSL: it is true only when OpenSSL can read every
 // extension it knows. A CA that carries one of them twice, or one that does not decode, reads as
@@ -10,12 +10,27 @@
 // failed is not decided here and the other extensions are not examined: the comparison is what
 // finds the problem, so if Node.js comes to read such a certificate correctly, the warning stops.
 //
+// `eku` is Node.js's `keyUsage`, which is `undefined` both when the Extended Key Usage extension
+// is absent and when it is present and OpenSSL cannot read it: then `eku` is `null`, which says the
+// certificate restricts no usage, about a certificate that does restrict them. So the Extended Key
+// Usage extensions are counted here too, and when the certificate carries one and Node.js reports
+// none, it gets an EKU_UNRELIABLE warning; `eku` keeps the value Node.js gives. The count tells the
+// two ways OpenSSL fails apart: an extension that appears more than once is not read, and one that
+// appears once and is not read is one whose value does not decode. The value itself is not
+// decoded: OpenSSL reads values a strict decoder would refuse, such as bytes after the sequence of
+// usages or a length in the long form, so decoding it would warn about certificates whose `eku` is
+// right. Counting needs the same walk to the extensions as `kind` does, which is why it is here: a
+// module of its own could import nothing and would hold a copy of the walk, and the two copies
+// would have to agree on which certificates cannot be walked. Those get KIND_UNRELIABLE, which
+// says so, and no second warning from the count.
+//
 // This is not a DER parser, and it must not grow into one. A reader of our own can misread a
 // certificate without anyone noticing, which is worse than not reading it, so this one is held to
-// what the warning needs:
+// what the warnings need:
 //   - it walks only as far as the extensions and decodes only the values of basicConstraints and
-//     Key Usage; every other field and extension is skipped by its length, unread;
-//   - nothing it reads leaves this module except the warning: no field of the observation comes
+//     Key Usage; the Extended Key Usage extensions are counted by their identifier, and every other
+//     field and extension is skipped by its length, unread;
+//   - nothing it reads leaves this module except the warnings: no field of the observation comes
 //     from it, and every one is read through X509Certificate;
 //   - it never throws and never guesses: whatever it cannot walk or decode is reported as such,
 //     and the warning follows;
@@ -23,11 +38,13 @@
 //     indefinite length. A long-form length that a short one could have written is read: it has
 //     one reading, and Node.js reads it and keeps the bytes as they are;
 //   - it imports nothing.
-// Reading another extension, or another field, is a new decision, not an addition to this file.
+// Reading another extension, or another field, is a new decision with its reason written here, as
+// the one for the Extended Key Usage is, not an addition made in passing.
 
-// The content of the OBJECT IDENTIFIER of each extension: 2.5.29.19 and 2.5.29.15.
+// The content of the OBJECT IDENTIFIER of each extension: 2.5.29.19, 2.5.29.15 and 2.5.29.37.
 const BASIC_CONSTRAINTS = [0x55, 0x1d, 0x13];
 const KEY_USAGE = [0x55, 0x1d, 0x0f];
+const EXTENDED_KEY_USAGE = [0x55, 0x1d, 0x25];
 
 // The tags this reader meets.
 const BOOLEAN = 0x01;
@@ -59,6 +76,28 @@ export function kindWarning(der, ca, index) {
         return null;
     }
     return { code: "KIND_UNRELIABLE", certificate: index, message: `kind cannot be trusted: ${why}` };
+}
+
+/**
+ * The EKU_UNRELIABLE warning for a certificate, or `null` when its `eku` can be trusted.
+ * @param {Uint8Array} der The certificate, as Node.js keeps it (`raw`).
+ * @param {readonly string[] | undefined} usages What Node.js reports (`keyUsage`), which `eku` is
+ *   made from.
+ * @param {number} index The certificate's index in the observation.
+ * @returns {{ code: string, certificate: number, message: string } | null}
+ */
+export function ekuWarning(der, usages, index) {
+    // Node.js read the extension, so `eku` is what it holds.
+    if (usages !== undefined) return null;
+    const extensions = extensionsOf(der);
+    // The certificate gets KIND_UNRELIABLE, which says its extensions could not be read.
+    if (extensions === null) return null;
+    const count = extensions.filter(({ id }) => sameBytes(der, id, EXTENDED_KEY_USAGE)).length;
+    // Absent, which is what `null` says.
+    if (count === 0) return null;
+    // A repeated extension is not read whatever its copies hold, so that is the reason when both apply.
+    const why = count > 1 ? "appears more than once" : "does not decode";
+    return { code: "EKU_UNRELIABLE", certificate: index, message: `eku cannot be trusted: Extended Key Usage ${why}` };
 }
 
 /**
