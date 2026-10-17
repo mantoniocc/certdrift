@@ -11,6 +11,12 @@ export const EXTENDED_KEY_USAGE_OIDS = Object.freeze({
     OCSPSigning: "1.3.6.1.5.5.7.3.9",
 });
 
+/**
+ * The OID of anyExtendedKeyUsage. It is not one of the six names, so the observation shows it as
+ * this text. An extension that lists it forbids no usage (RFC 5280, 4.2.1.12).
+ */
+export const ANY_EXTENDED_KEY_USAGE = "2.5.29.37.0";
+
 /** @type {Map<string, string>} */
 const NAMES = new Map(Object.entries(EXTENDED_KEY_USAGE_OIDS).map(([name, oid]) => [oid, name]));
 

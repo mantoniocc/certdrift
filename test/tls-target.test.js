@@ -62,6 +62,80 @@ test("a target that is not host[:port] or [IPv6][:port] throws TypeError", () =>
     }
 });
 
+test("a target that starts with a scheme and :// is refused as a URL, in any letter case, and says that the target is host[:port]", () => {
+    const urls = [
+        "https://example.com", "ftp://a", "example.com://", "HTTPS://example.com:443/x", "http://[::1]:8443", "hTTp://x", "https://", "a://",
+        "a+b.c-d://x", "https://example.com:8443", "https://192.0.2.1", "ssh://user@example.com", "x://", "svn+ssh://host/path",
+    ];
+    for (const url of urls) {
+        assert.throws(() => targetOf(url), (error) => {
+            assert.ok(error instanceof TypeError, url);
+            assert.equal(error.message, `target ${JSON.stringify(url)} cannot be read: a URL is not accepted: the target is host[:port]`);
+            return true;
+        }, url);
+    }
+});
+
+test("a host:port, a bracketed IPv6 target and a bare host are not caught by the rule for a URL, and neither is a text that merely looks like one", () => {
+    for (const accepted of ["example.com", "example.com:443", "localhost:8443", "[::1]", "[::1]:443", "[2001:db8::1]:443", "192.0.2.1:443", "a:1", "ex_ample.com:443"]) {
+        assert.doesNotThrow(() => targetOf(accepted), accepted);
+    }
+    // Not a scheme as RFC 3986 writes it (it starts with a digit, a hyphen, a space or an underscore
+    // inside, or has no //), so they keep the reason they always had.
+    for (const [text, reason] of /** @type {[string, RegExp][]} */ ([
+        ["1http://x", /the port must be a whole number/],
+        ["-x://y", /the port must be a whole number/],
+        ["ex_ample.com://", /the port must be a whole number/],
+        [" https://x", /the port must be a whole number/],
+        ["https ://x", /the port must be a whole number/],
+        ["https:example.com", /the port must be a whole number/],
+        ["https:/example.com", /the port must be a whole number/],
+        ["//example.com", /write a host name/],
+        ["[::1]://x", /the port must be a whole number/],
+        ["example.com:443://", /must be written in brackets/],
+        ["mailto:a@b", /the port must be a whole number/],
+    ])) {
+        assert.throws(() => targetOf(text), (error) => {
+            assert.ok(error instanceof TypeError);
+            assert.match(error.message, reason, text);
+            assert.doesNotMatch(error.message, /URL/, text);
+            return true;
+        }, text);
+    }
+});
+
+test("the rule for a URL changes only which reason is given: over generated texts, a text is refused as a URL exactly when it starts with a scheme and ://, and no text that is read starts with one", () => {
+    const pieces = ["https", "HTTP", "ftp", "a", "1", "-", "+", ".", "_", ":", "//", "/", "[", "]", "::1", "example.com", "443", "192.0.2.1", " ", "@", "%"];
+    const start = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+    let urls = 0;
+    let read = 0;
+    /** @param {string} text */
+    const check = (text) => {
+        /** @type {string | undefined} */
+        let message;
+        try {
+            targetOf(text);
+            read += 1;
+        } catch (error) {
+            message = /** @type {Error} */ (error).message;
+        }
+        const refusedAsUrl = message !== undefined && message.includes("a URL is not accepted");
+        assert.equal(refusedAsUrl, start.test(text), JSON.stringify(text));
+        if (refusedAsUrl) urls += 1;
+    };
+    for (const first of pieces) {
+        for (const second of pieces) {
+            check(first + second);
+            for (const third of pieces) {
+                check(first + second + third);
+                for (const fourth of pieces) check(first + second + third + fourth);
+            }
+        }
+    }
+    assert.ok(urls > 100, `${urls} texts refused as a URL`);
+    assert.ok(read > 50, `${read} texts read`);
+});
+
 test("a refused target's message says what to write, and quotes the target so that it cannot break a line", () => {
     assert.throws(() => targetOf("2001:db8::1"), /must be written in brackets, as \[2001:db8::1\]:443/);
     assert.throws(() => targetOf("example.com:99999"), /port must be a whole number from 1 to 65535/);

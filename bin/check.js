@@ -26,6 +26,7 @@ import {
     problemCount,
     problemLines,
     sameEntry,
+    unknownEntries,
     warnTargets,
 } from "./policy-flags.js";
 import { KEY_OPTIONS, keyRequestOf, readKey } from "./private-key.js";
@@ -83,8 +84,8 @@ result fails.
 Requirements, which make the policy (each adds one rule; the validity of the certificate is
 always checked):
   --expect-eku <name|OID>        The certificate lists the usage. Repeatable.
-  --eku-allows <name|OID>        The certificate lists the usage or has no Extended Key Usage
-                                 extension. Repeatable.
+  --eku-allows <name|OID>        The certificate lists the usage, lists anyExtendedKeyUsage or has no
+                                 Extended Key Usage extension. Repeatable.
   --reject-eku <name|OID>        The certificate does not list the usage. Repeatable.
   --expect-san <name|address>    The certificate lists the DNS name or the IP address. Repeatable.
   --expect-fingerprint <sha256>  The certificate has this SHA-256. Upper case and pairs separated
@@ -119,7 +120,10 @@ Options:
   --timeout <ms>        The longest to wait for the host, in milliseconds. Only with --host.
   --policy <file>       Read the requirements from a policy file, JSON with "contract": 1. The
                         options above add to it. An option that gives an entry the file already has
-                        is misuse. "-" reads the policy from standard input.
+                        is misuse. "-" reads the policy from standard input. A top-level entry
+                        this version does not know, such as expectSAN for expectSan, is misuse too;
+                        "$schema" is the only property besides "contract" and the entries accepted
+                        there. A policy that repeats an entry counts the last one, without a word.
   --warn-only <code>    Report a failure of the rule that gives this reason code as WARN, which does
                         not make the check fail. Repeatable. The rule has to be part of the run: a
                         code that does not exist, or whose rule is not checked, is misuse. EXPIRED
@@ -132,8 +136,8 @@ Options:
   -q, --quiet           Print nothing. The exit code still says what happened.
   -h, --help            Print this text.
 
-With no requirement option, no --key and no --policy there is nothing to check, which is misuse.
---warn-only and --as-of alone do not count; --expect-fingerprint-of does. A policy that lists
+With no requirement option, no --key, no --expect-fingerprint-of and no --policy there is nothing
+to check, which is misuse. --warn-only and --as-of alone do not count. A policy that lists
 matchesPrivateKey needs --key. A policy with only "contract" is something to check, and says so
 with a POLICY_EMPTY warning.
 
@@ -298,7 +302,7 @@ export async function checkCommand(args, { env, stdin, out, err }) {
         if (problem !== null) return misuse(`--lifetime-used ${problem}, and got ${JSON.stringify(text)}`);
     }
     if ([...FLAGS, ...ASKED, ...FROM_FILE].every(({ flag }) => /** @type {Record<string, unknown>} */ (values)[flag] === undefined) && policyPath === undefined) {
-        return misuse("nothing to check: give a requirement option or --policy");
+        return misuse("nothing to check: give a requirement option, --key, --expect-fingerprint-of or --policy");
     }
 
     const bad = flagProblems(values);
@@ -330,7 +334,7 @@ export async function checkCommand(args, { env, stdin, out, err }) {
             err(`certdrift: ${safe(read.described)}: the policy is not valid JSON\n`);
             return 3;
         }
-        const problems = policyProblems(parsedFile.value);
+        const problems = [...policyProblems(parsedFile.value), ...unknownEntries(parsedFile.value)];
         if (problems.length > 0) return misuse(`${read.described}: ${problemCount(problems)}`, problemLines(problems));
         file = /** @type {Record<string, unknown>} */ (parsedFile.value);
     }

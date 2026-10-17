@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { entryOfCode, evaluate, inspect, serializeCheckResult } from "../src/index.js";
+import { entryOfCode, evaluate, inspect, policyProblems, serializeCheckResult } from "../src/index.js";
 import { CHECK_OPTIONS, exitOf, nowOf, presentCheck } from "../bin/check.js";
 import { CWD, fixture, run, runMain, targetOf, typed } from "./helpers/command.js";
+import { ANY_EKU_ALONE } from "./helpers/certificates.js";
 import { validatorFor } from "./helpers/schema.js";
 import { serveChain } from "./helpers/tls.js";
 
@@ -477,16 +478,180 @@ test("today: a policy file with the same entry twice checks only the second, bec
     assert.deepEqual(jsonOf(result).policy.expectEku.value, ["serverAuth"]);
 });
 
-test("today: a __proto__ key in a policy file is an unknown property that changes nothing, and unknown properties are not repeated in the result", async (t) => {
+test("a __proto__ key at the top level of a policy file is refused as an unknown entry, and an unknown property inside an entry is tolerated and not repeated in the result", async (t) => {
     const dir = scratch(t);
-    const path = written(dir, "proto.json", '{"contract":1,"__proto__":{"expectKind":{"value":"end-entity"},"expectEku":{"value":["codeSigning"]}},"secret":{"note":"x"},"expectKind":{"value":"end-entity","extra":"y"}}');
-    const printed = jsonOf(await check(["--json", "--as-of", startOf("leaf-p256.pem"), "--policy", path, typed("leaf-p256.pem")]));
+    const refused = await runMain(["check", "--policy", written(dir, "proto.json", '{"contract":1,"__proto__":{"expectKind":{"value":"end-entity"},"expectEku":{"value":["codeSigning"]}},"secret":{"note":"x"},"expectKind":{"value":"end-entity","extra":"y"}}'), typed("leaf-p256.pem")]);
+    assert.deepEqual([refused.code, refused.stdout], [2, ""]);
+    assert.match(refused.stderr, /: the policy is not valid: 2 problems\n {2}\/__proto__: is not an entry this version knows\n {2}\/secret: is not an entry this version knows\n/);
+    // The property of an entry that this version does not know is tolerated, and neither it nor its value is repeated.
+    const printed = jsonOf(await check(["--json", "--as-of", startOf("leaf-p256.pem"), "--policy", written(dir, "inside.json", '{"contract":1,"expectKind":{"value":"end-entity","extra":"y","__proto__":{"x":1}}}'), typed("leaf-p256.pem")]));
     assert.deepEqual(Object.keys(printed.policy).sort(), ["contract", "expectKind", "validityNotEnded", "validityStarted"]);
     assert.deepEqual(printed.policy.expectKind, { value: "end-entity", severity: "fail" });
     assert.equal(printed.results.length, 3);
-    assert.doesNotMatch(JSON.stringify(printed.policy), /secret|extra/);
+    assert.doesNotMatch(JSON.stringify(printed.policy), /extra/);
 });
 
+test("--lifetime-used before the certificate's notBefore says 0% of the lifetime is used in the text and 0 in the JSON, and the verdict is the one it was", async () => {
+    const { certificate } = targetOf("leaf-p256.pem");
+    const before = shifted(certificate.notBefore, -86400 * 30);
+    const text = await runMain(["check", "--as-of", before, "--warn-only", "NOT_YET_VALID", "--lifetime-used", "50%", typed("leaf-p256.pem")]);
+    assert.equal(text.code, 0, text.stderr);
+    assert.match(text.stdout, /^ {2}OK {4}maxLifetimeUsed +LIFETIME_USED_EXCEEDED +0% of the lifetime is used, within 50%$/m);
+    const json = JSON.parse((await runMain(["check", "--json", "--as-of", before, "--warn-only", "NOT_YET_VALID", "--lifetime-used", "50%", typed("leaf-p256.pem")])).stdout);
+    const found = json.results.find((/** @type {any} */ one) => one.code === "LIFETIME_USED_EXCEEDED");
+    assert.equal(Object.is(found.actual, 0), true);
+    assert.equal(found.status, "pass");
+    assert.deepEqual(errorsOf(json), []);
+    // After the end the share is above 100 and stays so.
+    const after = await runMain(["check", "--as-of", shifted(certificate.notAfter, 86400 * 365 * 100), "--warn-only", "EXPIRED", "--lifetime-used", "50%", typed("leaf-p256.pem")]);
+    assert.equal(after.code, 1);
+    assert.match(after.stdout, /^ {2}FAIL {2}maxLifetimeUsed +LIFETIME_USED_EXCEEDED +\d{3,}% of the lifetime is used, above 50%$/m);
+});
+
+test("a policy file with a byte order mark and an unknown entry names the entry, and the same file without the entry is read", async (t) => {
+    const dir = scratch(t);
+    const bom = (/** @type {string} */ text) => Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(text)]);
+    const refused = await runMain(["check", "--policy", written(dir, "bom.json", bom('{"contract":1,"expectSAN":{}}')), typed("leaf-p256.pem")]);
+    assert.equal(refused.code, 2);
+    assert.match(refused.stderr, /\n {2}\/expectSAN: is not an entry this version knows\n/);
+    const read = await runMain(["check", "--as-of", startOf("leaf-p256.pem"), "--policy", written(dir, "bom-ok.json", bom('{"$schema":"x","contract":1,"expectKind":{"value":"end-entity"}}')), typed("leaf-p256.pem")]);
+    assert.equal(read.code, 0, read.stderr);
+});
+
+test("a policy file with a top-level entry this version does not know, such as expectSAN, is exit 2 and names it among the other problems of the policy and not instead of them", async (t) => {
+    const dir = scratch(t);
+    const alone = await runMain(["check", "--policy", written(dir, "typo.json", '{"contract":1,"expectSAN":{"value":["a.example"]}}'), typed("leaf-p256.pem")]);
+    assert.deepEqual([alone.code, alone.stdout], [2, ""]);
+    assert.match(alone.stderr, /^certdrift: .*typo\.json: the policy is not valid: 1 problem\n {2}\/expectSAN: is not an entry this version knows\n/);
+    // Next to a problem of the library, in the same listing: the library's first, the unknown entries after, sorted.
+    const both = await runMain(["check", "--policy", written(dir, "both.json", '{"contract":2,"zzz":1,"expectSAN":{},"expiresWithin":{"value":30},"aaa":1}'), typed("leaf-p256.pem")]);
+    assert.equal(both.code, 2);
+    assert.deepEqual(both.stderr.split("\n").slice(1, 6), [
+        "  /contract: contract 2 is not one this version knows: it must be 1",
+        "  /expiresWithin/value: must be a whole number of days or hours, such as 30d or 72h, of at most six digits",
+        "  /aaa: is not an entry this version knows",
+        "  /expectSAN: is not an entry this version knows",
+        "  /zzz: is not an entry this version knows",
+    ]);
+    assert.match(both.stderr.split("\n")[0], /: the policy is not valid: 5 problems$/);
+    // Standard input is a policy file too.
+    const piped = await runMain(["check", "--policy", "-", typed("leaf-p256.pem")], { input: '{"contract":1,"expectSAN":{}}' });
+    assert.match(piped.stderr, /^certdrift: standard input: the policy is not valid: 1 problem\n {2}\/expectSAN: is not an entry this version knows\n/);
+    assert.equal(piped.code, 2);
+});
+
+test("$schema is the only top-level property besides contract and the entries that check --policy accepts, and a name that looks like another entry or like a property of every object is not one", async (t) => {
+    const dir = scratch(t);
+    const start = startOf("leaf-p256.pem");
+    for (const schema of ['"https://example.com/policy.schema.json"', "5", "null", '{"a":1}']) {
+        const ok = await runMain(["check", "--as-of", start, "--policy", written(dir, "schema.json", `{"$schema":${schema},"contract":1,"expectKind":{"value":"end-entity"}}`), typed("leaf-p256.pem")]);
+        assert.equal(ok.code, 0, `${schema}: ${ok.stderr}`);
+    }
+    // A policy with only contract and $schema is still a policy with nothing to check.
+    const empty = await runMain(["check", "--as-of", start, "--policy", written(dir, "empty.json", '{"$schema":"x","contract":1}'), typed("leaf-p256.pem")]);
+    assert.equal(empty.code, 0);
+    assert.match(empty.stdout, /POLICY_EMPTY/);
+    /** @type {[string, string][]} */
+    const names = [
+        ["$Schema", "/$Schema"], ["$schema ", "/$schema "], ["schema", "/schema"], ["Contract", "/Contract"], ["expectsan", "/expectsan"], ["ExpectSan", "/ExpectSan"],
+        ["constructor", "/constructor"], ["toString", "/toString"], ["hasOwnProperty", "/hasOwnProperty"], ["__proto__", "/__proto__"], ["", "/"], ["a/b~c", "/a~1b~0c"], ["10", "/10"],
+    ];
+    for (const [name, path] of names) {
+        const text = `{"contract":1,${JSON.stringify(name)}:{}}`;
+        const refused = await runMain(["check", "--policy", written(dir, "name.json", text), typed("leaf-p256.pem")]);
+        assert.equal(refused.code, 2, JSON.stringify(name));
+        assert.ok(refused.stderr.split("\n").includes(`  ${path}: is not an entry this version knows`), `${JSON.stringify(name)}: ${refused.stderr}`);
+    }
+});
+
+test("every entry of schema/policy.schema.json is accepted by check --policy and a made-up one is not", async (t) => {
+    const dir = scratch(t);
+    const schema = JSON.parse(readFileSync(new URL("../schema/policy.schema.json", import.meta.url), "utf8"));
+    const entries = Object.keys(schema.properties).filter((name) => name !== "contract");
+    assert.ok(entries.length >= 11, entries.join(", "));
+    for (const entry of entries) {
+        const result = await runMain(["check", "--policy", written(dir, "entry.json", JSON.stringify({ contract: 1, [entry]: {} })), typed("leaf-p256.pem")]);
+        // An entry that needs a value, or a key, says so; none is called unknown.
+        assert.doesNotMatch(result.stderr, /is not an entry this version knows/, entry);
+    }
+    const made = await runMain(["check", "--policy", written(dir, "made.json", JSON.stringify({ contract: 1, [`${entries[0]}Made`]: {} })), typed("leaf-p256.pem")]);
+    assert.equal(made.code, 2);
+    assert.match(made.stderr, new RegExp(`\\n {2}/${entries[0]}Made: is not an entry this version knows\\n`));
+});
+
+test("a JSON file that is not a policy, given as one, has its top-level names listed and none of its values", async (t) => {
+    const dir = scratch(t);
+    const token = "s3cr3t-value-0123456789abcdef";
+    const jwk = JSON.stringify({ kty: "RSA", n: token, d: `${token}-private`, nested: { deep: token } });
+    const result = await runMain(["check", "--policy", written(dir, "jwk.json", jwk), typed("leaf-p256.pem")]);
+    assert.equal(result.code, 2);
+    for (const name of ["/contract: is required", "/d: is not", "/kty: is not", "/n: is not", "/nested: is not"]) assert.ok(result.stderr.includes(name), name);
+    for (let at = 0; at + 10 <= token.length; at += 1) assert.ok(!result.stderr.includes(token.slice(at, at + 10)), token.slice(at, at + 10));
+    // A name with a control character is escaped like anything else the command prints.
+    const named = await runMain(["check", "--policy", written(dir, "named.json", `{"contract":1,"a\\u001b[31mb":1}`), typed("leaf-p256.pem")]);
+    assert.equal(named.code, 2);
+    assert.ok(!named.stderr.includes(ESC), "no escape character reaches the terminal");
+    assert.ok(named.stderr.includes("/a\\u{1B}[31mb: is not an entry"), named.stderr);
+});
+
+test("a policy file with ten thousand unknown entries lists them all in one pass, and one of arrays and scalars has no entries to look at", async (t) => {
+    const dir = scratch(t);
+    const many = `{"contract":1,${Array.from({ length: 10_000 }, (_, index) => `"k${index}":0`).join(",")}}`;
+    const result = await runMain(["check", "--policy", written(dir, "many.json", many), typed("leaf-p256.pem")]);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr.split("\n")[0], /: the policy is not valid: 10000 problems$/);
+    assert.equal(result.stderr.split("\n").filter((line) => line.endsWith(": is not an entry this version knows")).length, 10_000);
+    for (const content of ["[]", '["expectSAN"]', "5", "null", '"expectSAN"']) {
+        const odd = await runMain(["check", "--policy", written(dir, "odd.json", content), typed("leaf-p256.pem")]);
+        assert.equal(odd.code, 2, content);
+        assert.match(odd.stderr, /^certdrift: .*: the policy is not valid: 1 problem\n {2}\(the policy\): the policy must be a JSON object\n/, content);
+    }
+});
+
+test("the library still tolerates what check --policy refuses: evaluate and policyProblems accept an entry they do not know, so a program that passes its own policy keeps working", () => {
+    const policy = { contract: 1, expectSAN: { value: ["a.example"] }, $schema: "x" };
+    assert.deepEqual(policyProblems(policy), []);
+    const check = evaluate(inspect(fixture("leaf-p256.pem")), /** @type {any} */ (policy), { now: startOf("leaf-p256.pem") });
+    assert.equal(check.summary.fail, 0);
+    assert.ok(!Object.hasOwn(check.policy, "expectSAN"));
+});
+
+test("the README says that an entry written twice in a policy file counts once and the last one counts, because JSON.parse keeps the last and says nothing, and that the command does not detect it", () => {
+    const readme = checkSection().replaceAll("`", "").replace(/\s+/g, " ");
+    for (const part of [
+        "An entry written twice in the file counts once, and the last one is the one that counts: JSON.parse keeps the last of two equal keys and does not say so",
+        "The command does not detect it.",
+        "A top-level entry of the file that this version does not know, such as expectSAN for expectSan, is exit 2",
+        "The only top-level property that is not an entry and is accepted, besides contract, is $schema",
+        "Properties inside an entry that this version does not know are still tolerated",
+    ]) assert.ok(readme.includes(part), part);
+});
+
+test("the nothing-to-check message, check --help and the README name the same four things: a requirement option, --key, --expect-fingerprint-of and --policy", async () => {
+    const help = (await runMain(["check", "--help"])).stdout.replace(/\s+/g, " ");
+    assert.ok(help.includes("With no requirement option, no --key, no --expect-fingerprint-of and no --policy there is nothing to check, which is misuse."), help);
+    const readme = checkSection().replaceAll("`", "").replace(/\s+/g, " ");
+    assert.ok(readme.includes("With no requirement option, no --key, no --expect-fingerprint-of and no --policy there is nothing to check, which is exit 2 (nothing to check: give a requirement option, --key, --expect-fingerprint-of or --policy)"), readme);
+    const refused = await runMain(["check", typed("leaf-p256.pem")]);
+    assert.equal(refused.code, 2);
+    assert.ok(refused.stderr.startsWith("certdrift: nothing to check: give a requirement option, --key, --expect-fingerprint-of or --policy\n"), refused.stderr);
+});
+
+test("check --eku-allows passes a certificate that lists anyExtendedKeyUsage for any usage and --expect-eku fails it, with a message that says what the certificate lists", async (t) => {
+    const dir = scratch(t);
+    const path = written(dir, "any.pem", ANY_EKU_ALONE);
+    const base = ["--as-of", "2026-06-01", "--warn-only", "EXPIRED", "--warn-only", "NOT_YET_VALID"];
+    const allows = await runMain(["check", ...base, "--eku-allows", "clientAuth", path]);
+    assert.equal(allows.code, 0, allows.stderr);
+    assert.match(allows.stdout, /^ {2}OK {4}ekuAllows .*the Extended Key Usage extension lists 2\.5\.29\.37\.0, which includes anyExtendedKeyUsage, so it forbids no usage$/m);
+    const expects = await runMain(["check", ...base, "--expect-eku", "clientAuth", path]);
+    assert.equal(expects.code, 1);
+    assert.match(expects.stdout, /^ {2}FAIL {2}expectEku .*EKU_MISSING .*the certificate lists anyExtendedKeyUsage, which permits every usage without listing one$/m);
+    // The same certificate through the JSON the command prints.
+    const printed = JSON.parse((await runMain(["check", ...base, "--json", "--eku-allows", "serverAuth", "--expect-eku", "serverAuth", "--reject-eku", "2.5.29.37.0", path])).stdout);
+    assert.deepEqual(printed.results.slice(2).map((/** @type {any} */ one) => `${one.code} ${one.status}`), ["EKU_MISSING fail", "EKU_NOT_PERMITTED pass", "EKU_FORBIDDEN fail"]);
+    assert.deepEqual(errorsOf(printed), []);
+});
 test("a policy nested far deeper than the call stack allows is refused as a policy and does not crash the command", async (t) => {
     const dir = scratch(t);
     const depth = 100_000;
@@ -585,11 +750,11 @@ test("a code that does not exist, or that has no entry to soften, is exit 2: a m
     }
 });
 
-test("--warn-only alone and --as-of alone are not something to check, and the options with a policy that has only contract are", async () => {
+test("--warn-only alone and --as-of alone are not something to check, the message names a requirement option, --key, --expect-fingerprint-of and --policy, and the options with a policy that has only contract are something to check", async () => {
     for (const args of [[], ["--warn-only", "EXPIRED"], ["--as-of", "2026-03-01"], ["--json"], ["--select", "ab"], ["--warn-only", "EXPIRED", "--as-of", "2026-03-01", "--json"]]) {
         const result = await check([...args, typed("leaf-p256.pem")]);
         assert.deepEqual([args.join(" "), result.code, result.stdout], [args.join(" "), 2, ""]);
-        assert.match(result.stderr, /^certdrift: nothing to check: give a requirement option or --policy\n/, args.join(" "));
+        assert.match(result.stderr, /^certdrift: nothing to check: give a requirement option, --key, --expect-fingerprint-of or --policy\n/, args.join(" "));
     }
     const only = await check(["--as-of", startOf("leaf-p256.pem"), "--policy", policyPath("empty"), typed("leaf-p256.pem")]);
     assert.equal(only.code, 0, only.stderr);

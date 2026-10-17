@@ -1,7 +1,7 @@
 import { outsideValidity } from "./derived.js";
 import { sanItem } from "./policy.js";
 import { findKey } from "./private-key.js";
-import { usageName } from "./usage.js";
+import { ANY_EXTENDED_KEY_USAGE, usageName } from "./usage.js";
 
 // What each entry of a policy decides, as the README's table of reason codes says it. A rule reads
 // the certificate the observation targets, the instant and its own value, and answers whether it
@@ -101,12 +101,15 @@ export const RULES = {
                 expected: value,
             };
         }
+        // A lifetime that has not started has used none of it. Only what is said is cut at zero: the
+        // verdict above is decided on the seconds as they are.
+        const started = used >= 0n;
         // Rounded the way the verdict went, so a message never says "57% used, above 57%".
-        const percent = divide(100n * used, duration, holds ? "down" : "up");
+        const percent = started ? divide(100n * used, duration, holds ? "down" : "up") : 0n;
         return {
             holds,
             message: `${percent}% of the lifetime is used, ${holds ? "within" : "above"} ${threshold}`,
-            actual: (now - notBefore) / (notAfter - notBefore),
+            actual: started ? (now - notBefore) / (notAfter - notBefore) : 0,
             expected: value,
         };
     },
@@ -116,9 +119,12 @@ export const RULES = {
         const missing = unique(wanted.filter((usage) => !(target.eku ?? []).includes(usage)));
         // An absent extension lists nothing, so every usage is missing and it fails like an empty one.
         const holds = missing.length === 0;
+        // anyExtendedKeyUsage forbids nothing, but it is not a usage that is listed, which is what this
+        // rule asks for. The message says so, since the extension lists a usage and the rule fails.
+        const any = !holds && listsAny(target.eku) ? "; the certificate lists anyExtendedKeyUsage, which permits every usage without listing one" : "";
         return {
             holds,
-            message: holds ? `${ekuState(target.eku)}, which includes ${unique(wanted).join(", ")}` : `${ekuState(target.eku)}, so it does not list ${missing.join(", ")}`,
+            message: holds ? `${ekuState(target.eku)}, which includes ${unique(wanted).join(", ")}` : `${ekuState(target.eku)}, so it does not list ${missing.join(", ")}${any}`,
             actual: target.eku,
             expected: wanted,
         };
@@ -127,13 +133,14 @@ export const RULES = {
     ekuAllows({ target, value }) {
         const wanted = usagesOf(value);
         const missing = unique(wanted.filter((usage) => !(target.eku ?? []).includes(usage)));
-        const holds = target.eku === null || missing.length === 0;
-        return {
-            holds,
-            message: target.eku === null ? `${ekuState(target.eku)}, which restricts nothing` : holds ? `${ekuState(target.eku)}, which includes ${unique(wanted).join(", ")}` : `${ekuState(target.eku)}, which does not include ${missing.join(", ")}`,
-            actual: target.eku,
-            expected: wanted,
-        };
+        const holds = target.eku === null || listsAny(target.eku) || missing.length === 0;
+        // Said in the order the cases are decided: nothing restricts, every usage is listed, the
+        // extension lists anyExtendedKeyUsage, or a usage is missing.
+        let message = `${ekuState(target.eku)}, which does not include ${missing.join(", ")}`;
+        if (target.eku === null) message = `${ekuState(target.eku)}, which restricts nothing`;
+        else if (missing.length === 0) message = `${ekuState(target.eku)}, which includes ${unique(wanted).join(", ")}`;
+        else if (holds) message = `${ekuState(target.eku)}, which includes anyExtendedKeyUsage, so it forbids no usage`;
+        return { holds, message, actual: target.eku, expected: wanted };
     },
 
     rejectEku({ target, value }) {
@@ -202,6 +209,14 @@ function ekuState(eku) {
 }
 
 /**
+ * Whether the extension lists anyExtendedKeyUsage, which forbids no usage.
+ * @param {string[] | null} eku
+ */
+function listsAny(eku) {
+    return eku !== null && eku.includes(ANY_EXTENDED_KEY_USAGE);
+}
+
+/**
  * The usages of an entry as the observation names them, in the order and with the repeats the policy
  * wrote, so each is still the one at its position in the entry's value.
  * @param {string[]} value
@@ -245,8 +260,9 @@ function percentOf(digits, scale) {
 }
 
 /**
- * A division of whole numbers rounded down or up, for a positive divisor. BigInt division
- * truncates toward zero, which is neither once the dividend is negative.
+ * A division of whole numbers rounded down or up, for a positive divisor. It takes only a dividend
+ * of zero or more: BigInt division truncates toward zero, which rounds a negative one up and not
+ * down, and a lifetime that has not started never gets here.
  * @param {bigint} dividend
  * @param {bigint} divisor
  * @param {"down" | "up"} direction
@@ -254,7 +270,6 @@ function percentOf(digits, scale) {
  */
 function divide(dividend, divisor, direction) {
     const quotient = dividend / divisor;
-    const remainder = dividend % divisor;
-    if (direction === "down") return remainder < 0n ? quotient - 1n : quotient;
-    return remainder > 0n ? quotient + 1n : quotient;
+    if (direction === "down") return quotient;
+    return dividend % divisor > 0n ? quotient + 1n : quotient;
 }

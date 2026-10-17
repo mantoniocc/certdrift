@@ -44,7 +44,7 @@
       }
     },
     "expectEku": {
-      "description": "Fails with EKU_MISSING unless the target lists every usage explicitly. A certificate with no Extended Key Usage extension (eku is null) fails, and so does one whose extension lists nothing (eku is []): the rule asks for a usage to be listed, and neither lists one. null and [] are different cases in the observation and in the other two EKU rules.",
+      "description": "Fails with EKU_MISSING unless the target lists every usage explicitly. A certificate with no Extended Key Usage extension (eku is null) fails, and so does one whose extension lists nothing (eku is []): the rule asks for a usage to be listed, and neither lists one. null and [] are different cases in the observation and in the other two EKU rules. A certificate that lists anyExtendedKeyUsage (the OID 2.5.29.37.0, which eku shows as that text) still fails unless it also lists the usage: the extension permits every usage, but it does not list one, and this rule asks for the usage to be listed.",
       "$ref": "#/$defs/entry",
       "type": "object",
       "required": ["value"],
@@ -53,7 +53,7 @@
       }
     },
     "ekuAllows": {
-      "description": "Fails with EKU_NOT_PERMITTED when the target has an Extended Key Usage extension that does not include every usage. A certificate with no such extension (eku is null) passes, because an absent extension restricts nothing; one whose extension lists nothing (eku is []) fails, because an extension that is present and empty permits nothing.",
+      "description": "Fails with EKU_NOT_PERMITTED when the target has an Extended Key Usage extension that does not include every usage and does not list anyExtendedKeyUsage. A certificate with no such extension (eku is null) passes, because an absent extension restricts nothing; one whose extension lists nothing (eku is []) fails, because an extension that is present and empty permits nothing. A certificate whose extension lists anyExtendedKeyUsage (the OID 2.5.29.37.0, which eku shows as that text) passes for any usage, because that extension forbids nothing.",
       "$ref": "#/$defs/entry",
       "type": "object",
       "required": ["value"],
@@ -109,7 +109,7 @@
       }
     },
     "matchesPrivateKey": {
-      "description": "Fails with KEY_MISMATCH when a private key that was read does not correspond to the target's public key, and with KEY_UNREADABLE when the key could not be read (its format, encrypted with no passphrase, or an algorithm that is not supported). Both codes take this one entry's severity. The entry has no value: the key is handed to the function that evaluates, and a policy never carries a private key, a passphrase or anything read from them. A property put here anyway is tolerated like any unknown property, and no result or output ever repeats it.",
+      "description": "Fails with KEY_MISMATCH when a private key that was read does not correspond to the target's public key, and with KEY_UNREADABLE when the key could not be read: the file holds a certificate, a public key, no private key or more than one, its format or algorithm is not supported or the key is damaged, it is encrypted and no passphrase was given, or the passphrase given does not decrypt it. Both codes take this one entry's severity. The entry has no value: the key is handed to the function that evaluates, and a policy never carries a private key, a passphrase or anything read from them. A property put here anyway is tolerated like any unknown property, and no result or output ever repeats it.",
       "$ref": "#/$defs/entry"
     }
   },

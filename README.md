@@ -27,7 +27,7 @@ certdrift inspect --host api.example.com:443
 certdrift inspect --host '[2001:db8::1]:443' --servername api.example.com
 ```
 
-The host is a name or an address, with the port after a colon. The port is 443 unless given. An IPv6 address is written in brackets, and the argument is quoted because a shell reads brackets as a pattern. The host is always given with `--host`: a path is always a file, whatever it looks like, so `--host` takes no path and no `-`, and does not read standard input.
+The host is a name or an address, with the port after a colon. The port is 443 unless given. An IPv6 address is written in brackets, and the argument is quoted because a shell reads brackets as a pattern. A URL is not accepted: a target that starts with a scheme and `://`, such as `https://example.com`, is exit 2, and the message says that the target is `host[:port]`. The host is always given with `--host`: a path is always a file, whatever it looks like, so `--host` takes no path and no `-`, and does not read standard input.
 
 The certificates are exactly the ones the server sent, in the order it sent them. Nothing is added from the trust store of the machine, and nothing says whether that machine would trust them.
 
@@ -84,9 +84,11 @@ certdrift check --policy policy.json --warn-only LIFETIME_USED_EXCEEDED server.p
 certdrift check --policy policy.json --expect-fingerprint 2D:71:16:42:B7:26:B0:44:01:62:7C:A9:FB:AC:32:F5:C8:53:0F:B1:90:3C:C4:DB:02:25:87:17:92:1A:48:81 server.pem
 ```
 
-With no requirement option, no `--key` and no `--policy` there is nothing to check, which is exit 2; `--warn-only` and `--as-of` alone do not count. A policy that has only `contract` is something to check, and gives the `POLICY_EMPTY` warning. A policy that lists `matchesPrivateKey` needs `--key`: without one it is exit 2, and the message says that the policy asks for a private key.
+With no requirement option, no `--key`, no `--expect-fingerprint-of` and no `--policy` there is nothing to check, which is exit 2 (`nothing to check: give a requirement option, --key, --expect-fingerprint-of or --policy`); `--warn-only` and `--as-of` alone do not count. A policy that has only `contract` is something to check, and gives the `POLICY_EMPTY` warning. A policy that lists `matchesPrivateKey` needs `--key`: without one it is exit 2, and the message says that the policy asks for a private key.
 
-If a policy file repeats an entry, as `{"expectEku": …, "expectEku": …}`, only the last one is read, as with any JSON.
+A top-level entry of the file that this version does not know, such as `expectSAN` for `expectSan`, is exit 2: the message names it, with the other problems of the file and not instead of them, because a misspelled entry would otherwise check nothing in silence. The only top-level property that is not an entry and is accepted, besides `contract`, is `$schema`, which editors add to JSON files. Properties inside an entry that this version does not know are still tolerated, and `evaluate` and `policyProblems` still tolerate an unknown entry, so a program that passes its own policy keeps working.
+
+An entry written twice in the file counts once, and the last one is the one that counts: `JSON.parse` keeps the last of two equal keys and does not say so, as in `{"expectEku": …, "expectEku": …}`. The command does not detect it.
 
 ### A private key
 
@@ -243,6 +245,8 @@ The code of a rule of your own is any code of capital letters, digits and unders
 
 Nothing the caller passed is modified, and nothing in the result is shared with it. A rule of your own gets the observation frozen all the way down, so it cannot change what the next rule or the result sees. The same arguments always give the same result: `evaluate` does not read the clock. The messages of a result can hold text that comes from a certificate (a name in the SAN, a usage), and the library does not escape it: whoever prints it does.
 
+`POLICY_ENTRIES` is the list of the names of the entries, frozen and in the order of the table above. `policyProblems` tolerates an entry it does not know, so a program that reads a policy from a person and wants to refuse a misspelled entry compares the names of the file with this list; `certdrift check --policy` does, and also accepts `contract` and `$schema`.
+
 `entryOfCode(code)` gives the entry of the policy that produces a reason code, `"validityNotEnded"` for `EXPIRED`, and `null` for a code that has no entry: `POLICY_EMPTY`, `RULE_ERROR` and a code this version does not know. It answers for the library's codes. A rule of your own may give one of them too, so a program that has results from both looks at `rule.name` before asking for the entry.
 
 ### Matching a private key
@@ -317,19 +321,21 @@ Codes are versioned with the contract: adding a code is additive, and changing w
 | `EXPIRED` | `validityNotEnded` | `notAfter` is not before `now` | `notAfter` is before `now` | `notAfter` / `now` |
 | `NOT_YET_VALID` | `validityStarted` | `notBefore` is not after `now` | `notBefore` is after `now` | `notBefore` / `now` |
 | `EXPIRES_SOON` | `expiresWithin` | the seconds left until `notAfter` are not below the threshold | they are below it, which includes a certificate that has already ended | the seconds left, negative once ended / the threshold in seconds |
-| `LIFETIME_USED_EXCEEDED` | `maxLifetimeUsed` | `now - notBefore` is not above the threshold times `notAfter - notBefore` | it is above | the fraction used, unrounded, `null` when `notAfter` is not after `notBefore` / the threshold |
-| `EKU_MISSING` | `expectEku` | the target's `eku` is a list that includes every usage | `eku` is `null`, is `[]`, or lacks a usage | `eku` / the usages, by name where there is one |
-| `EKU_NOT_PERMITTED` | `ekuAllows` | `eku` is `null`, or a list that includes every usage | `eku` is a list that lacks a usage, which includes `[]` | `eku` / the usages |
+| `LIFETIME_USED_EXCEEDED` | `maxLifetimeUsed` | `now - notBefore` is not above the threshold times `notAfter - notBefore` | it is above | the fraction used, unrounded and above 1 once the validity has ended, `0` before `notBefore` (the message says `0%`), `null` when `notAfter` is not after `notBefore` / the threshold |
+| `EKU_MISSING` | `expectEku` | the target's `eku` is a list that includes every usage | `eku` is `null`, is `[]`, or lacks a usage, whether or not it includes `2.5.29.37.0` (anyExtendedKeyUsage) | `eku` / the usages, by name where there is one |
+| `EKU_NOT_PERMITTED` | `ekuAllows` | `eku` is `null`, or a list that includes every usage or includes `2.5.29.37.0` (anyExtendedKeyUsage) | `eku` is a list that lacks a usage and does not include `2.5.29.37.0`, which includes `[]` | `eku` / the usages |
 | `EKU_FORBIDDEN` | `rejectEku` | `eku` is `null`, `[]` or a list with none of the usages | `eku` lists any of them | `eku` / the usages |
 | `SAN_MISSING` | `expectSan` | every name is listed: DNS names in `san.dns`, addresses in `san.ip` | any is not | `{ dns, ip }` the target lists / `{ dns, ip }` the names, as compared |
 | `FINGERPRINT_MISMATCH` | `expectFingerprint` | the target's `sha256` is the expected one | it is not | the target's `sha256` / the expected one |
 | `TARGET_NOT_END_ENTITY` | `expectKind` | the target's `kind` is `end-entity` | it is any other kind | `kind` / `end-entity` |
 | `KEY_MISMATCH` | `matchesPrivateKey` | a private key was read and corresponds to the target's public key | a key was read and does not | the SPKI SHA-256 of the key's public key / the target's `spkiSha256` |
-| `KEY_UNREADABLE` | `matchesPrivateKey` | never: a key that can be read gives `KEY_MISMATCH` | the key could not be read: the file holds a certificate, a public key or no private key or more than one, its format or algorithm is not supported, it is encrypted with no passphrase or the passphrase does not decrypt it. The reasons are in "Matching a private key" | none |
+| `KEY_UNREADABLE` | `matchesPrivateKey` | never: a key that can be read gives `KEY_MISMATCH` | the key could not be read: the file holds a certificate, a public key, no private key or more than one, its format or algorithm is not supported or the key is damaged, it is encrypted and no passphrase was given, or the passphrase given does not decrypt it. The reasons are in "Matching a private key" | none |
 | `POLICY_EMPTY` | none | never | the policy has no entry besides the two validity ones and no rule of your own is given. Always `warn`, and `rule` is `null` | none |
 | `RULE_ERROR` | none | never | a rule of your own threw, returned a promise or something that is not a result, returned `POLICY_EMPTY` or `RULE_ERROR`, or returned an `actual`, an `expected` or a `rule.value` that JSON cannot hold. Always `fail`, and `rule` is `{ name }` with the name of the rule that failed | none |
 
 `eku` is `null` when the extension is absent, which means Extended Key Usage does not restrict the purpose, not that the certificate is good for everything. That is why there are two rules about it: `expectEku` requires a usage to be listed, and `ekuAllows` only requires that the extension does not forbid it. An extension that is present and lists nothing (`[]`) permits nothing, so both fail on it, each with its own code, and `rejectEku` passes on it.
+
+An extension that lists anyExtendedKeyUsage (the OID `2.5.29.37.0`, which `eku` shows as that text, since it is not one of the six names) forbids no usage, so `ekuAllows` passes for any usage, alone or next to others (RFC 5280, 4.2.1.12). `expectEku` asks for the usage to be listed, and anyExtendedKeyUsage lists none, so it still fails with `EKU_MISSING` unless the usage is listed too; its message says that the certificate lists anyExtendedKeyUsage. `rejectEku` does not change: it fails only for a usage that is listed, `2.5.29.37.0` included.
 
 `eku` is also `null` when the extension is present and Node.js cannot read it, which happens when it appears more than once or its value does not decode. A certificate like that restricts its usages, but `ekuAllows` and `rejectEku` pass it and `expectEku` fails it, as they do for an absent extension. The observation carries an `EKU_UNRELIABLE` warning for that certificate, which `inspect` and `check` print with the others and `--json` carries: it says that `eku` cannot be trusted, and the message says whether the extension appears more than once or does not decode. `eku` keeps the value Node.js gives, and no verdict changes.
 

@@ -6,7 +6,7 @@ import * as library from "../src/index.js";
 import { AmbiguousTargetError, inspect, outsideValidity, policyProblems, serializeCheckResult } from "../src/index.js";
 import { ENTRIES } from "../src/policy.js";
 import { EXTENDED_KEY_USAGE_OIDS } from "../src/usage.js";
-import { EMPTY_EKU_EXTENSION, UNDECODABLE_EKU_EXTENSION } from "./helpers/certificates.js";
+import { ANY_EKU_ALONE, ANY_EKU_WITH_SERVER_AUTH, EMPTY_EKU_EXTENSION, UNDECODABLE_EKU_EXTENSION } from "./helpers/certificates.js";
 import { AT, evaluate, fixture, observed, policyOf, resultOf, shifted } from "./helpers/evaluation.js";
 import { checked } from "./helpers/rules.js";
 import { validatorFor } from "./helpers/schema.js";
@@ -398,7 +398,7 @@ test("maxLifetimeUsed reads a threshold written with an exponent exactly, and so
     assert.equal(lifetime(1, 1000, 0).actual, 0);
     assert.equal(lifetime(1, 1000, 1000).actual, 1);
     assert.equal(lifetime(1, 1000, 1500).actual, 1.5, "unrounded, and above 1 once the validity has ended");
-    assert.equal(lifetime(0.5, 1000, -250).actual, -0.25, "and negative before it starts");
+    assert.equal(lifetime(0.5, 1000, -250).actual, 0, "and 0 before it starts, where nothing of it is used");
 });
 
 test("maxLifetimeUsed over the longest validity a certificate can have, from the year 0 to the year 9999, is exact", () => {
@@ -439,6 +439,53 @@ test("a threshold of -0 is the threshold 0: it decides the same and writes the s
     assert.deepEqual(errorsOf(negative), []);
 });
 
+test("maxLifetimeUsed before notBefore says 0% of the lifetime is used with the threshold, and its actual is 0 and not -0, at any distance and for any threshold", () => {
+    for (const threshold of [0, 0.5, 1, 1e-7]) {
+        for (const used of [-1, -250, -1e9, -3e10]) {
+            const found = lifetime(threshold, 1000, used);
+            assert.match(found.message, /^0% of the lifetime is used, within [0-9.]+%$/, `${threshold} at ${used}`);
+            assert.equal(Object.is(found.actual, 0), true, `${threshold} at ${used}: ${found.actual}`);
+            assert.equal(found.status, "pass");
+            assert.equal(found.expected, threshold);
+        }
+    }
+    assert.equal(Object.is(lifetime(0.5, 1000, 0).actual, 0), true, "at notBefore the fraction is 0 as before");
+    assert.deepEqual(errorsOf(run({ notBefore: "2026-08-01T00:00:00Z" }, { maxLifetimeUsed: { value: 0.5 } }, { now: "2026-07-01T00:00:00Z" })), []);
+    assert.equal(serializeCheckResult(run({ notBefore: "2026-08-01T00:00:00Z" }, { maxLifetimeUsed: { value: 0.5 } }, { now: "2026-07-01T00:00:00Z" })).includes('"actual": 0,'), true);
+});
+
+test("the verdict of maxLifetimeUsed is the one its definition gives, over instants before notBefore, at it, inside, at and after notAfter, for a validity with a duration, none and an inverted one", () => {
+    // The definition as the schema writes it, with no division and no clamping: it fails when
+    // now - notBefore is greater than the threshold times notAfter - notBefore. Whole numbers, so
+    // nothing here depends on a floating point product.
+    const holdsBy = (/** @type {number} */ used, /** @type {number} */ duration, /** @type {number} */ hundredths) => used * 100 <= hundredths * duration;
+    const from = "2026-01-01T00:00:00Z";
+    /** @type {[string, number][]} */
+    const validities = [["a validity of 1000 s", 1000], ["a validity with no duration", 0], ["an inverted validity", -100]];
+    for (const [name, duration] of validities) {
+        for (const [threshold, hundredths] of /** @type {[number, number][]} */ ([[0, 0], [0.5, 50], [1, 100]])) {
+            for (const used of [-1e9, -500, -60, -1, 0, 1, 499, 500, 501, 1000, 1001, 1e9]) {
+                const notBefore = shifted(from, 0);
+                const found = resultOf(run({ notBefore, notAfter: shifted(from, duration) }, { maxLifetimeUsed: { value: threshold } }, { now: shifted(from, used) }), "maxLifetimeUsed");
+                assert.equal(found.status === "pass", holdsBy(used, duration, hundredths), `${name}, threshold ${threshold}, ${used} s from notBefore`);
+            }
+        }
+    }
+    // Where the duration is positive, the instant before notBefore, the one equal to it and the one after notAfter.
+    assert.equal(lifetime(0.5, 1000, -1).status, "pass");
+    assert.equal(lifetime(0.5, 1000, 0).status, "pass");
+    assert.equal(lifetime(0.5, 1000, 1001).status, "fail");
+});
+
+test("a validity with no duration or an inverted one keeps its message and a null actual before notBefore too, because there is no fraction to cut at 0", () => {
+    const from = "2026-01-01T00:00:00Z";
+    for (const [duration, used] of /** @type {[number, number][]} */ ([[0, -1], [0, -1e6], [-100, -1], [-100, -1e6]])) {
+        const found = resultOf(run({ notBefore: shifted(from, 100), notAfter: shifted(from, 100 + duration) }, { maxLifetimeUsed: { value: 0.5 } }, { now: shifted(from, 100 + used) }), "maxLifetimeUsed");
+        assert.equal(found.actual, null, `${duration} at ${used}`);
+        assert.match(found.message, /^no fraction of the lifetime can be worked out, because the validity does not end after it starts, and the rule (holds|does not hold) for 50%$/);
+    }
+});
+
 test("the message of maxLifetimeUsed rounds the percentage the way the verdict went, so it never says 57% used, above 57%", () => {
     const message = (/** @type {number} */ threshold, /** @type {number} */ duration, /** @type {number} */ used) => lifetime(threshold, duration, used).message;
     assert.equal(message(0.57, 1e9, 5.7e8), "57% of the lifetime is used, within 57%");
@@ -450,8 +497,10 @@ test("the message of maxLifetimeUsed rounds the percentage the way the verdict w
     assert.equal(message(1e-7, 1e7, 2), "1% of the lifetime is used, above 0.00001%");
     assert.equal(message(0, 1000, 0), "0% of the lifetime is used, within 0%");
     assert.equal(message(1, 1000, 1000), "100% of the lifetime is used, within 100%");
-    assert.equal(message(0.5, 1000, -250), "-25% of the lifetime is used, within 50%");
-    assert.equal(message(0.5, 1000, -251), "-26% of the lifetime is used, within 50%");
+    assert.equal(message(0.5, 1000, -250), "0% of the lifetime is used, within 50%", "before notBefore nothing is used, and the message does not say a negative share");
+    assert.equal(message(0.5, 1000, -1), "0% of the lifetime is used, within 50%");
+    assert.equal(message(0, 1000, -1), "0% of the lifetime is used, within 0%");
+    assert.equal(message(0.5, 1000, 1500), "150% of the lifetime is used, above 50%", "a share above 100 for an expired certificate stays as it is");
     assert.match(message(5e-324, 1, 0), /^0% of the lifetime is used, within 0\.0{321}5%$/);
     assert.match(lifetime(0.5, 0, 1).message, /does not end after it starts, and the rule does not hold for 50%/);
     assert.match(lifetime(0.5, 0, 0).message, /does not end after it starts, and the rule holds for 50%/);
@@ -569,9 +618,52 @@ test("today an entry this version does not know, such as a misspelled expectSAN,
     assert.deepEqual(policyProblems({ contract: 1, expectSAN: { value: [] } }), [], "and policyProblems tolerates it, as the contract says");
 });
 
-test("today a certificate that lists anyExtendedKeyUsage satisfies neither expectEku nor ekuAllows for serverAuth, because the rules count only the usages that are listed", () => {
-    const check = run({ eku: ["2.5.29.37.0"] }, { expectEku: { value: ["serverAuth"] }, ekuAllows: { value: ["serverAuth"] }, rejectEku: { value: ["serverAuth"] } });
-    assert.deepEqual(statuses(check).slice(2), ["EKU_MISSING fail", "EKU_NOT_PERMITTED fail", "EKU_FORBIDDEN pass"]);
+test("a certificate that lists anyExtendedKeyUsage passes ekuAllows for any usage because the extension forbids nothing, fails expectEku because it lists no usage, and leaves rejectEku as it is", () => {
+    const entries = { expectEku: { value: ["serverAuth"] }, ekuAllows: { value: ["serverAuth"] }, rejectEku: { value: ["serverAuth"] } };
+    assert.deepEqual(statuses(run({ eku: ["2.5.29.37.0"] }, entries)).slice(2), ["EKU_MISSING fail", "EKU_NOT_PERMITTED pass", "EKU_FORBIDDEN pass"]);
+    // Next to another usage: expectEku asks for a usage that is listed, and serverAuth is not.
+    assert.deepEqual(statuses(run({ eku: ["2.5.29.37.0", "clientAuth"] }, entries)).slice(2), ["EKU_MISSING fail", "EKU_NOT_PERMITTED pass", "EKU_FORBIDDEN pass"]);
+    assert.deepEqual(statuses(run({ eku: ["2.5.29.37.0", "serverAuth"] }, entries)).slice(2), ["EKU_MISSING pass", "EKU_NOT_PERMITTED pass", "EKU_FORBIDDEN fail"]);
+});
+
+test("on certificates that list anyExtendedKeyUsage, alone and next to serverAuth, as Node.js reads them, ekuAllows passes for any usage, expectEku fails with EKU_MISSING and says so, and rejectEku is unchanged", () => {
+    const at = new Date("2026-06-01T00:00:00Z");
+    const alone = inspect(ANY_EKU_ALONE, { at });
+    const together = inspect(ANY_EKU_WITH_SERVER_AUTH, { at });
+    // What Node.js gives comes first: the OID as text, since it is not one of the six names.
+    assert.deepEqual(alone.certificates[0].eku, ["2.5.29.37.0"]);
+    assert.deepEqual(together.certificates[0].eku, ["2.5.29.37.0", "serverAuth"]);
+    assert.deepEqual([alone.warnings, together.warnings], [[], []]);
+
+    const rules = (/** @type {string} */ usage) => ({ expectEku: { value: [usage] }, ekuAllows: { value: [usage] }, rejectEku: { value: ["2.5.29.37.0"] } });
+    for (const usage of ["serverAuth", "clientAuth", "codeSigning", "emailProtection", "timeStamping", "OCSPSigning", "1.3.6.1.4.1.311.10.3.4"]) {
+        const found = evaluate(alone, policyOf(rules(usage)));
+        assert.deepEqual(statuses(found).slice(2), ["EKU_MISSING fail", "EKU_NOT_PERMITTED pass", "EKU_FORBIDDEN fail"], `alone, ${usage}`);
+        assert.match(resultOf(found, "expectEku").message, /the certificate lists anyExtendedKeyUsage, which permits every usage without listing one$/, usage);
+        assert.match(resultOf(found, "ekuAllows").message, /^the Extended Key Usage extension lists 2\.5\.29\.37\.0, which includes anyExtendedKeyUsage, so it forbids no usage$/, usage);
+        assert.deepEqual(resultOf(found, "ekuAllows").actual, ["2.5.29.37.0"]);
+    }
+    // Next to serverAuth: that usage is listed, any other is permitted and not listed.
+    const serverFound = evaluate(together, policyOf(rules("serverAuth")));
+    assert.deepEqual(statuses(serverFound).slice(2), ["EKU_MISSING pass", "EKU_NOT_PERMITTED pass", "EKU_FORBIDDEN fail"]);
+    assert.equal(resultOf(serverFound, "ekuAllows").message, "the Extended Key Usage extension lists 2.5.29.37.0, serverAuth, which includes serverAuth");
+    assert.doesNotMatch(resultOf(serverFound, "expectEku").message, /anyExtendedKeyUsage/);
+    const clientFound = evaluate(together, policyOf(rules("clientAuth")));
+    assert.deepEqual(statuses(clientFound).slice(2), ["EKU_MISSING fail", "EKU_NOT_PERMITTED pass", "EKU_FORBIDDEN fail"]);
+    assert.match(resultOf(clientFound, "expectEku").message, /so it does not list clientAuth; the certificate lists anyExtendedKeyUsage/);
+    // Asking for anyExtendedKeyUsage itself is asking for a listed usage, and it is listed.
+    const asked = evaluate(alone, policyOf({ expectEku: { value: ["2.5.29.37.0"] }, rejectEku: { value: ["serverAuth"] } }));
+    assert.deepEqual(statuses(asked).slice(2), ["EKU_MISSING pass", "EKU_FORBIDDEN pass"]);
+    assert.deepEqual(errorsOf(serverFound), []);
+});
+
+test("ekuAllows still fails for a usage that a certificate without anyExtendedKeyUsage does not list, and for the OID of another usage next to it", () => {
+    const row = (/** @type {string[] | null} */ eku) => statuses(run({ eku }, { ekuAllows: { value: ["serverAuth"] } })).slice(2);
+    assert.deepEqual(row(["clientAuth"]), ["EKU_NOT_PERMITTED fail"]);
+    assert.deepEqual(row(["2.5.29.37.1"]), ["EKU_NOT_PERMITTED fail"], "an OID that only starts like it is another usage");
+    assert.deepEqual(row(["2.5.29.37.0.1"]), ["EKU_NOT_PERMITTED fail"]);
+    assert.deepEqual(row([]), ["EKU_NOT_PERMITTED fail"]);
+    assert.deepEqual(row(null), ["EKU_NOT_PERMITTED pass"]);
 });
 
 // ---------------------------------------------------------------------------------------------
