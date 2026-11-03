@@ -611,16 +611,15 @@ test("an observation can hold up to a million values in its lists and certificat
     // and the name, the usage and the certificate of the second.
     const rest = 2 + 3;
 
+    // The other side lists the same name, so that however the comparison goes wrong it has no change
+    // to make for each of the copies.
     const exact = make({ target: { "san.dns": names(MAX_VALUES - rest) } });
-    // At the limit it is read in full: the one name of the other side is the only name that arrived.
-    assert.deepEqual(compare(exact, make()).changes, [
-        { field: "san.dns", direction: "removed", before: "a.example" },
-        { field: "san.dns", direction: "added", after: "service.example" },
-    ]);
+    const same = make({ target: { "san.dns": ["a.example"] } });
+    assert.deepEqual(compare(exact, same).changes, [], "at the limit the lists are read in full");
     const past = make({ target: { "san.dns": names(MAX_VALUES - rest + 1) } });
     // The first observation still fits; the second is the one that goes past.
-    assert.throws(() => diff(past, make()), { name: "TypeError", message: "after.certificates is past the million values that are read" });
-    assert.throws(() => diff(make({ target: { "san.dns": names(MAX_VALUES + 1) } }), make()), { name: "TypeError", message: "before.certificates[0].san.dns is past the million values that are read" });
+    assert.throws(() => diff(past, same), { name: "TypeError", message: "after.certificates is past the million values that are read" });
+    assert.throws(() => diff(make({ target: { "san.dns": names(MAX_VALUES + 1) } }), same), { name: "TypeError", message: "before.certificates[0].san.dns is past the million values that are read" });
 
     // The limit is for both together, and the other lists count too.
     const half = make({ target: { "san.uri": names(600_000) } });
