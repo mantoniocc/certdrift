@@ -4,7 +4,8 @@ export { outsideValidity } from "./derived.js";
 export { policyProblems, entryOfCode, POLICY_ENTRIES } from "./policy.js";
 export { evaluate } from "./evaluate.js";
 export { matchesPrivateKey } from "./private-key.js";
-export { ParseError, AmbiguousTargetError, PolicyError } from "./errors.js";
+export { diff } from "./diff.js";
+export { ParseError, AmbiguousTargetError, PolicyError, ContractMismatchError } from "./errors.js";
 export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 
 // The types of the package's public API. They are declared here, in the entry point, and not
@@ -18,8 +19,8 @@ export { EXTENDED_KEY_USAGE_OIDS } from "./usage.js";
 // `EvaluateOptions` because a rule of the caller's own and the options of `evaluate()` have to be
 // written down by whoever passes them, `PrivateKey` and `MatchesPrivateKeyOptions` because a key
 // and the options of `matchesPrivateKey()` are built by the caller, and `Delta` and `Change`
-// because `serializeDelta()` takes a delta that a consumer builds and reads. The shapes of
-// `key`, `derived` and `observation` are written inline by the compiler.
+// because `serializeDelta()` takes a delta that a consumer builds and reads and `diff()` returns
+// one. The shapes of `key`, `derived` and `observation` are written inline by the compiler.
 // Adding a type here is additive for the people who use the package; removing or renaming one
 // is not.
 //

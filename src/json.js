@@ -10,7 +10,7 @@
 const MAX_DEPTH = 100;
 
 /** The most values copied: an observation of thousands of certificates is a fraction of this. */
-const MAX_VALUES = 1_000_000;
+export const MAX_VALUES = 1_000_000;
 
 /**
  * Whether a value is an object JSON can hold: plain (or with no prototype) and not an array.

@@ -541,9 +541,13 @@ test("the schema description names the fields a Delta does not compare, derived 
     says(description, /Neither are contract, format, target, index and issuedBy/);
     says(readme, /A delta does not compare `derived`, which follows from the other fields, or `observation\.at`, which says when an observation was made and nothing about the certificate/);
 
-    // What a comparison does with warnings is not decided by the Delta.
+    // The Delta's schema and the README's description of its shape say nothing of warnings: what a
+    // comparison does with them belongs to diff, and the README says it in the section about diff.
     assert.ok(!/warning/i.test(JSON.stringify(schema)));
-    assert.ok(!/warning/i.test(readme.slice(readme.indexOf("## What changed between two observations"))));
+    const comparing = readme.indexOf("### Comparing two observations");
+    assert.ok(comparing > readme.indexOf("## What changed between two observations"));
+    assert.ok(!/warning/i.test(readme.slice(readme.indexOf("## What changed between two observations"), comparing)));
+    assert.match(readme.slice(comparing), /`warnings`, `derived`, `observation\.at` and `observation\.source` take no part in the comparison/);
     // And no field of the document is one of those the description says is not compared.
     for (const name of exampleFiles) {
         for (const change of example(name).changes) {
