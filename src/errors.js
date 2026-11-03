@@ -36,6 +36,28 @@ export class AmbiguousTargetError extends Error {
 }
 
 /**
+ * Two observations that `diff` was asked to compare do not describe the same kind of document:
+ * they have another `contract` number or another `format`. What a field means depends on both, so
+ * comparing them would read one version's fields as the other's. It is not about the certificates,
+ * whose differences are never an error, and not a wrong call either: a program that keeps old
+ * observations meets it when the library moves on, and catches it apart from `TypeError`.
+ *
+ * `field` says which of the two differs. When both do, it is `contract`, the one that decides what
+ * `format` can mean. The message never quotes the format, which is text of the caller's.
+ */
+export class ContractMismatchError extends Error {
+    /**
+     * @param {"contract" | "format"} field
+     * @param {string} message
+     */
+    constructor(field, message) {
+        super(message);
+        this.name = "ContractMismatchError";
+        this.field = field;
+    }
+}
+
+/**
  * The policy given to `evaluate` is not one it can apply: its shape is wrong, its `contract` is not
  * one this version knows, or it lists an entry that needs an input `evaluate` was not given. That
  * is misuse of the call, not a failed check, so it is an error and not a result.

@@ -344,7 +344,7 @@ An extension that lists anyExtendedKeyUsage (the OID `2.5.29.37.0`, which `eku` 
 
 ## What changed between two observations
 
-A **delta** says what changed between two observations of a certificate. It is JSON with its own `contract` number (`1`), independent of the observation's, the policy's and the check result's. `schema/delta.schema.json` describes it, `schema/examples/delta/` shows deltas that validate, and `serializeDelta(delta)` writes one as text with the keys of the contract in a fixed order, so the same delta always gives the same bytes. The package defines this shape and writes it: it does not compare two observations yet, so a delta is something a program builds or reads.
+A **delta** says what changed between two observations of a certificate. It is JSON with its own `contract` number (`1`), independent of the observation's, the policy's and the check result's. `schema/delta.schema.json` describes it, `schema/examples/delta/` shows deltas that validate, and `serializeDelta(delta)` writes one as text with the keys of the contract in a fixed order, so the same delta always gives the same bytes. `diff(before, after)` fills it from two observations (see [Comparing two observations](#comparing-two-observations)), and a program can also build or read one.
 
 A delta describes and does not judge. It has no class, no reason code and no status, and it never says whether a change matters: a program reads that from the `field`, the `direction` and the values of each change.
 
@@ -431,3 +431,29 @@ The chain is about what the server or the file sent, not about the target, so `i
 ### Order and bytes
 
 `changes` has a fixed order, so that equal comparisons give equal bytes: the fields in the order the schema lists them in the description of `field` (`kind` first, `chain` last), `removed` before `added` before `changed` for one field, and the elements of a list in the order they have in it. `serializeDelta` keeps the order of `changes` and writes the keys of each object in the order of the examples; a key the contract does not name is kept after them, sorted. A side that is `undefined` is written as absent, as `JSON.stringify` writes any property, so `null` is the only way to write a side whose value is null.
+
+### Comparing two observations
+
+`diff(before, after)` compares two observations, as `inspect()` returns them, and gives the delta described above. It judges nothing: whether a change matters is for whoever reads it.
+
+```js
+import { diff, inspect, serializeDelta } from "certdrift";
+
+const deployed = inspect(deployedPem);
+const renewed = inspect(renewedPem);
+console.log(serializeDelta(diff(deployed, renewed)));
+```
+
+The first argument is `before` and the second is `after`, for the whole result: the sides of the delta are those two observations, and `removed` means the value was in the first and is not in the second. Giving them the other way round reverses every direction, so a name that was lost reads as one that was added. Neither says which is older.
+
+The target of each observation, the certificate its `target` points at, is compared field by field, each as the observation writes it: `kind`, `selfSigned`, `subject` and `issuer` (`cn` and `dn`), `serial`, `notBefore`, `notAfter`, the four lists of `san`, `eku`, `key.algorithm`, `key.size`, `key.curve`, `sha256` and `spkiSha256`. A field that is not a set is `changed` when its two values differ, `null` included, and is absent from the delta when they are equal. `identical` is `true` exactly when the `sha256` of both targets is the same, whatever else differs.
+
+The SAN lists and `eku` are compared as sets: a name only in `before` is `removed`, one only in `after` is `added`, each as its own change carrying the name as the observation lists it, and how many times a list repeats a name is not a change. `eku` going between `null` and a list, `[]` included, is one `changed` with the whole value on each side, in both directions; a list that loses all its usages is a `removed` for each of them and ends in `[]`, never in `null`.
+
+The chain is the certificates of an observation other than its target, each as its position among them (from 0) and its `sha256`. A link only `before` sends is `removed`, with its position in `before`; one only `after` sends is `added`, with its position in `after`; a replacement is a `removed` and an `added` with the same position. The links both send in another relative order are one `changed` whose sides list their `sha256` in the order of each side, and a link that moves only because another was added or dropped before it is no change. A certificate that an observation repeats is one link, at the position where it first appears. The chain is about what was sent, so `identical` can be `true` while it changes.
+
+`warnings`, `derived`, `observation.at` and `observation.source` take no part in the comparison, so two observations of the same material that differ only in them give no change. A warning about `kind` or about the Extended Key Usage is in the observation that carries it, and is not repeated in the delta. `at` and `source` are in the delta as the legend of its two sides. `issuedBy`, `index` and `target` are positions inside one observation and are not compared either.
+
+A difference between two certificates is never an error. `diff` throws `ContractMismatchError` when the two observations do not have the same `contract` number or the same `format`: what a field means depends on both. Its `field` says which (`"contract"`, or `"format"` when only that differs), and its message never quotes the format. Two observations that agree on a `contract` other than `1` or a `format` other than `"x509"` are a `TypeError`, as is an argument that is not an observation: the message names the field that is missing or of the wrong kind, and `diff` reads only the fields it compares, so anything else in an observation is left alone. An observation with more than a million values in its lists and certificates is a `TypeError` too.
+
+`diff` is a pure function of its two arguments. It reads no file, does not touch the network, changes nothing it was given and shares nothing with the result. The same two observations always give the same bytes through `serializeDelta`, whatever the order of the keys they were built with.

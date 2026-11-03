@@ -56,10 +56,11 @@ printf '[req]\ndistinguished_name = dn\n[dn]\n' > "$WORK/req.cnf"
 
 # --- Helpers ------------------------------------------------------------------
 
-# make_key <name> <rsa|rsa-pss|p256|p384|p521|brainpool-p256|sm2|ed25519|ml-dsa-44>
+# make_key <name> <rsa|rsa4096|rsa-pss|p256|p384|p521|brainpool-p256|sm2|ed25519|ml-dsa-44>
 make_key() {
   case "$2" in
     rsa)            openssl genpkey -quiet -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$WORK/$1.key" ;;
+    rsa4096)        openssl genpkey -quiet -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out "$WORK/$1.key" ;;
     rsa-pss)        openssl genpkey -quiet -algorithm RSA-PSS -pkeyopt rsa_keygen_bits:2048 -out "$WORK/$1.key" ;;
     p256)           openssl genpkey -quiet -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$WORK/$1.key" ;;
     p384)           openssl genpkey -quiet -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$WORK/$1.key" ;;
@@ -78,6 +79,14 @@ make_key() {
 make_leaf_keys() {
   make_key "$1" "$2"
   make_key "$1.mismatch" "$2"
+}
+
+# reuse_leaf_keys <name> <from>
+# A certificate that keeps the key of another one: <name>.key is a copy of <from>.key, and
+# <name>.mismatch.key a copy of its mismatch key, so every end-entity still has both.
+reuse_leaf_keys() {
+  cp "$WORK/$2.key" "$WORK/$1.key"
+  cp "$WORK/$2.mismatch.key" "$WORK/$1.mismatch.key"
 }
 
 # make_cert <name> <subject> <issuer|self> <extensions> [x509 options]
@@ -287,6 +296,74 @@ step "self-signed leaf (not marked as CA)"
 make_leaf_keys selfsigned-leaf p256
 make_cert selfsigned-leaf "/CN=selfsigned.example" self "$(leaf_ext "DNS:selfsigned.example" serverAuth)"
 
+# --- Comparison material ------------------------------------------------------
+# One reference certificate and the variants that each change one thing about it, so a
+# comparison of the reference with a variant shows only that change. Every variant keeps the
+# reference's key unless its key is what changes (-other-key, -p384, -rsa4096).
+
+step "second intermediate CA (a different name and key, signed by the root)"
+make_key intermediate-2 p256
+make_cert intermediate-2 "/CN=certdrift test second intermediate CA" root-ca "$INTERMEDIATE_EXT"
+
+step "comparison reference: pagos.example.com, EKU serverAuth, EC P-256, signed by the intermediate"
+make_leaf_keys pagos p256
+make_cert pagos "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com" serverAuth)"
+
+# Two certificates signed in the same second have the same notBefore and notAfter, which would
+# leave a variant looking like the reference in the dates. Every variant below is signed after
+# this pause.
+step "pause of one second after the reference"
+sleep 1
+
+step "reissue of the reference under the same key"
+reuse_leaf_keys pagos-reissue pagos
+make_cert pagos-reissue "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com" serverAuth)"
+
+step "reference under another P-256 key"
+make_leaf_keys pagos-other-key p256
+make_cert pagos-other-key "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com" serverAuth)"
+
+step "reference under a P-384 key"
+make_leaf_keys pagos-p384 p384
+make_cert pagos-p384 "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com" serverAuth)"
+
+step "reference under an RSA 4096 key"
+make_leaf_keys pagos-rsa4096 rsa4096
+make_cert pagos-rsa4096 "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com" serverAuth)"
+
+step "reference with one SAN name more"
+reuse_leaf_keys pagos-san-more pagos
+make_cert pagos-san-more "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com, DNS:status.pagos.example.com" serverAuth)"
+
+step "reference with one SAN name less"
+reuse_leaf_keys pagos-san-less pagos
+make_cert pagos-san-less "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com" serverAuth)"
+
+step "reference with one SAN name less and another more"
+reuse_leaf_keys pagos-san-swapped pagos
+make_cert pagos-san-swapped "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:v2.pagos.example.com" serverAuth)"
+
+step "reference without the Extended Key Usage extension"
+reuse_leaf_keys pagos-no-eku pagos
+make_cert pagos-no-eku "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com")"
+
+step "reference with EKU serverAuth and clientAuth"
+reuse_leaf_keys pagos-client-auth pagos
+make_cert pagos-client-auth "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com" "serverAuth, clientAuth")"
+
+step "reference with another subject (the SAN is the same)"
+reuse_leaf_keys pagos-other-subject pagos
+make_cert pagos-other-subject "/CN=cobros.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com" serverAuth)"
+
+step "reference already expired"
+reuse_leaf_keys pagos-expired pagos
+make_cert pagos-expired "/CN=pagos.example.com" intermediate "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com" serverAuth)" \
+  "-not_before 20250101000000Z -not_after 20250401000000Z"
+
+step "reference signed by the second intermediate"
+reuse_leaf_keys pagos-second-issuer pagos
+make_cert pagos-second-issuer "/CN=pagos.example.com" intermediate-2 "$(leaf_ext "DNS:pagos.example.com, DNS:api.pagos.example.com" serverAuth)"
+
 # --- Encodings ----------------------------------------------------------------
 
 step "leaf EC P-256 in DER (the same certificate as leaf-p256.pem)"
@@ -380,6 +457,15 @@ cat "$WORK/intermediate.pem" "$WORK/root-ca.pem" "$WORK/root-ca-cross.pem" "$WOR
 
 step "bundle with a root and its renewal (root, renewed root)"
 cat "$WORK/root-ca.pem" "$WORK/root-ca-renewed.pem" > "$WORK/bundle-renewed-root.pem"
+
+# The chain pairs of the comparison material: the reference with the intermediate that signs it,
+# and the one signed by the second intermediate with that one. The names start with "bundle-" so
+# that the walks over single certificates leave them alone.
+step "bundle of the comparison reference (pagos, intermediate)"
+cat "$WORK/pagos.pem" "$WORK/intermediate.pem" > "$WORK/bundle-pagos.pem"
+
+step "bundle of the comparison reference signed by the second intermediate (pagos-second-issuer, intermediate-2)"
+cat "$WORK/pagos-second-issuer.pem" "$WORK/intermediate-2.pem" > "$WORK/bundle-pagos-second-issuer.pem"
 
 # --- Finish -------------------------------------------------------------------
 

@@ -29,7 +29,8 @@ const root = new URL("../", import.meta.url);
 const repository = fileURLToPath(root);
 const errorsOf = validatorFor("observation");
 const checkErrorsOf = validatorFor("check-result");
-const FIXTURES = ["leaf-p256.pem", "leaf-p256.der", "leaf-p256.key", "leaf-rsa.key"];
+const deltaErrorsOf = validatorFor("delta");
+const FIXTURES = ["leaf-p256.pem", "leaf-p256.der", "leaf-p256.key", "leaf-rsa.key", "bundle-pagos.pem", "pagos-p384.pem"];
 const AT = new Date("2026-09-15T14:02:11Z");
 
 /**
@@ -310,6 +311,44 @@ test("the installed library serializes each delta example as the working copy do
     const installed = JSON.parse(result.stdout);
     assert.deepEqual(installed.texts, names.map((name) => readFileSync(join(directory, name), "utf8")));
     assert.deepEqual(installed.wrong, ["TypeError", "the delta must be an object"]);
+});
+
+test("the installed library compares two observations as the working copy does, byte for byte, and throws ContractMismatchError and TypeError as it does", async () => {
+    const result = await runInConsumer("diff.mjs", `
+        import { readFileSync } from "node:fs";
+        import { ContractMismatchError, diff, inspect, serializeDelta } from "certdrift";
+        const at = new Date("2026-09-15T14:02:11Z");
+        const observe = (name) => inspect(readFileSync(name), { at, source: { kind: "file", ref: name } });
+        const before = observe("bundle-pagos.pem");
+        const after = observe("pagos-p384.pem");
+        const caught = (action) => { try { action(); } catch (error) { return error; } };
+        const mismatch = caught(() => diff(before, { ...after, contract: 2 }));
+        const wrong = caught(() => diff(before, null));
+        console.log(JSON.stringify({
+            text: serializeDelta(diff(before, after)),
+            mismatch: [mismatch instanceof ContractMismatchError, mismatch instanceof Error, mismatch instanceof TypeError, mismatch.name, mismatch.field, mismatch.message],
+            wrong: [wrong instanceof TypeError, wrong.name, wrong.message],
+        }));
+    `);
+    assert.equal(result.code, 0, shown(result));
+    const installed = JSON.parse(result.stdout);
+
+    const working = await import("../src/index.js");
+    const observe = (/** @type {string} */ name) => working.inspect(readFileSync(new URL(`test/fixtures/${name}`, root)), { at: AT, source: { kind: "file", ref: name } });
+    const before = observe("bundle-pagos.pem");
+    const after = observe("pagos-p384.pem");
+    const delta = working.diff(before, after);
+    assert.equal(installed.text, working.serializeDelta(delta), "the same bytes");
+    assert.deepEqual(deltaErrorsOf(JSON.parse(installed.text)), []);
+    // The pair shows a link that is not sent, a key of another size and curve, and the usual four.
+    const fields = delta.changes.map((change) => `${change.field} ${change.direction}`);
+    assert.ok(fields.includes("chain removed") && fields.includes("key.size changed") && fields.includes("key.curve changed") && fields.includes("sha256 changed"), fields.join(", "));
+
+    let mismatch;
+    try { working.diff(before, { ...after, contract: /** @type {any} */ (2) }); } catch (error) { mismatch = /** @type {Error & { field: string }} */ (error); }
+    assert.deepEqual(installed.mismatch, [true, true, false, "ContractMismatchError", "contract", mismatch?.message]);
+    assert.equal(installed.mismatch[5], "the observations do not have the same contract: before has 1 and after has 2");
+    assert.deepEqual(installed.wrong, [true, "TypeError", "after must be an observation: an object"]);
 });
 
 test("the installed library evaluates a policy against an observation and gives what the working copy gives, throws PolicyError for a policy that is not valid, and maps a code to its entry", async () => {
@@ -1057,6 +1096,63 @@ test("a consumer that emits declarations names what it infers from serializeDelt
     const declarations = readFileSync(join(result.directory, "out", "emit.d.ts"), "utf8");
     // Delta itself is annotated by the consumer, so it is imported by name; what is inferred from it is not.
     for (const name of ["Change", "Source"]) {
+        assert.match(declarations, new RegExp(`import\\("certdrift"\\)\\.${name}\\b`), `${name} is not named through certdrift`);
+    }
+    assert.doesNotMatch(declarations, /certdrift\/types|certdrift\/src/, "the declarations point into the package's files");
+});
+
+test("diff and ContractMismatchError import as a value and a class from the installed package, and diff takes two Observations and gives a Delta", async () => {
+    const result = await typeCheckInConsumer({
+        "diff.ts": `
+        import type { Delta, Observation } from "certdrift";
+        import { ContractMismatchError, diff, inspect, serializeDelta } from "certdrift";
+        ${TYPE_HELPERS}
+
+        export type Checks = [
+            Expect<Equal<Parameters<typeof diff>, [before: Observation, after: Observation]>>,
+            Expect<Equal<ReturnType<typeof diff>, Delta>>,
+            Expect<Equal<ContractMismatchError["field"], "contract" | "format">>,
+            // None of them is \`any\`, which would be equal to a type that is \`any\` too.
+            Expect<Equal<Equal<ReturnType<typeof diff>, any>, false>>,
+            Expect<Equal<Equal<ContractMismatchError["field"], any>, false>>,
+        ];
+
+        const observation: Observation = inspect(new Uint8Array());
+        export const delta: Delta = diff(observation, observation);
+        export const text: string = serializeDelta(delta);
+
+        export function describe(error: unknown): string {
+            if (error instanceof ContractMismatchError) return \`\${error.name}: \${error.field}\`;
+            return "other";
+        }
+        export const made: Error = new ContractMismatchError("format", "m");
+
+        // Each of these fails as an unused directive if its type collapses to \`any\`.
+        // @ts-expect-error: the field is one of two words
+        export const notField = new ContractMismatchError("other", "m");
+        // @ts-expect-error: two observations are needed
+        export const one = diff(observation);
+        // @ts-expect-error: a delta is not an observation
+        export const notObservation = diff(delta, observation);
+        // @ts-expect-error: the result is a delta, not text
+        export const notText: string = diff(observation, observation);
+    `,
+    });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+});
+
+test("a consumer that emits declarations names what it infers from diff through certdrift", async () => {
+    const result = await typeCheckInConsumer({
+        "emit.ts": `
+        import { diff } from "certdrift";
+        import type { Observation } from "certdrift";
+        export const compare = (before: Observation, after: Observation) => ({ delta: diff(before, after), first: diff(before, after).changes[0], source: diff(before, after).before.source });
+    `,
+    }, { noEmit: false, declaration: true, emitDeclarationOnly: true, outDir: "out" });
+    assert.deepEqual([result.code, result.stdout], [0, ""], shown(result));
+
+    const declarations = readFileSync(join(result.directory, "out", "emit.d.ts"), "utf8");
+    for (const name of ["Delta", "Change", "Source"]) {
         assert.match(declarations, new RegExp(`import\\("certdrift"\\)\\.${name}\\b`), `${name} is not named through certdrift`);
     }
     assert.doesNotMatch(declarations, /certdrift\/types|certdrift\/src/, "the declarations point into the package's files");
